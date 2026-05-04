@@ -1,0 +1,575 @@
+<Window x:Class="FileRecoveryParser.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:FileRecoveryParser.ViewModels"
+        xmlns:cv="clr-namespace:FileRecoveryParser.Converters"
+        Title="File Recovery Parser"
+        Width="1280" Height="820"
+        MinWidth="900" MinHeight="600"
+        Background="{StaticResource BgDark}"
+        FontFamily="Segoe UI">
+
+  <Window.Resources>
+    <cv:FileSizeConverter         x:Key="FileSizeConverter"/>
+    <cv:CategoryColorConverter    x:Key="CategoryColorConverter"/>
+    <cv:BoolToVisibilityConverter x:Key="BoolToVis"/>
+    <cv:InverseBoolToVisibilityConverter x:Key="InvBoolToVis"/>
+    <cv:SortIndicatorConverter    x:Key="SortIndicator"/>
+    <cv:DateConverter             x:Key="DateConverter"/>
+
+    <!-- DataGrid row style with hover/select -->
+    <Style TargetType="DataGridRow">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="{StaticResource RowHover}"/>
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="{StaticResource SelectedRow}"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style TargetType="DataGridCell">
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding"         Value="6,4"/>
+      <Setter Property="Background"      Value="Transparent"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Style.Triggers>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="Transparent"/>
+          <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style TargetType="DataGridColumnHeader">
+      <Setter Property="Background"      Value="{StaticResource BgPanel}"/>
+      <Setter Property="Foreground"      Value="{StaticResource TextSecondary}"/>
+      <Setter Property="FontSize"        Value="11"/>
+      <Setter Property="FontWeight"      Value="SemiBold"/>
+      <Setter Property="Padding"         Value="8,6"/>
+      <Setter Property="BorderThickness" Value="0,0,0,1"/>
+      <Setter Property="BorderBrush"     Value="{StaticResource Border}"/>
+      <Setter Property="Cursor"          Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="DataGridColumnHeader">
+            <Border Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="{StaticResource BgMid}"/>
+          <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+  </Window.Resources>
+
+  <Window.DataContext>
+    <vm:MainViewModel/>
+  </Window.DataContext>
+
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="56"/>   <!-- title bar -->
+      <RowDefinition Height="*"/>    <!-- content -->
+      <RowDefinition Height="28"/>   <!-- status bar -->
+    </Grid.RowDefinitions>
+
+    <!-- ═══════════════════ TITLE BAR ═══════════════════ -->
+    <Border Grid.Row="0" Background="{StaticResource BgPanel}"
+            BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
+      <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0">
+        <TextBlock Text="⟳" FontSize="20" Foreground="{StaticResource Accent}" Margin="0,0,10,0"/>
+        <TextBlock Text="File Recovery Parser" FontSize="16" FontWeight="SemiBold"/>
+      </StackPanel>
+    </Border>
+
+    <!-- ═══════════════════ MAIN CONTENT ═══════════════════ -->
+    <Grid Grid.Row="1">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="220" MinWidth="180"/>   <!-- left sidebar -->
+        <ColumnDefinition Width="4"/>                    <!-- splitter -->
+        <ColumnDefinition Width="*"/>                    <!-- file list -->
+        <ColumnDefinition Width="4"/>                    <!-- splitter -->
+        <ColumnDefinition Width="260" MinWidth="0"/>     <!-- preview panel -->
+      </Grid.ColumnDefinitions>
+
+      <!-- ─── LEFT SIDEBAR ─────────────────────────────────── -->
+      <Border Grid.Column="0" Background="{StaticResource BgPanel}"
+              BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+          <StackPanel Margin="14,16,14,16">
+
+            <!-- Folder picker -->
+            <TextBlock Text="SOURCE FOLDER" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{StaticResource TextSecondary}" LetterSpacing="1" Margin="0,0,0,8"/>
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="8"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <TextBox Grid.Column="0" x:Name="FolderBox"
+                       Text="{Binding FolderPath, UpdateSourceTrigger=PropertyChanged}"
+                       ToolTip="Type or paste a folder path"/>
+              <Button Grid.Column="2" Content="…" Width="32" Height="32"
+                      Style="{StaticResource SecondaryButton}"
+                      Click="BrowseFolder_Click" ToolTip="Browse for folder"/>
+            </Grid>
+
+            <Button Content="Scan Folder" Margin="0,10,0,0" Height="36"
+                    Style="{StaticResource PrimaryButton}"
+                    Command="{Binding ScanCommand}"
+                    CommandParameter="{Binding FolderPath}"/>
+            <Button Content="Cancel" Margin="0,6,0,0" Height="32"
+                    Style="{StaticResource SecondaryButton}"
+                    Command="{Binding CancelCommand}"
+                    Visibility="{Binding IsScanning, Converter={StaticResource BoolToVis}}"/>
+
+            <!-- Progress indicator -->
+            <StackPanel Orientation="Horizontal" Margin="0,8,0,0"
+                        Visibility="{Binding IsScanning, Converter={StaticResource BoolToVis}}">
+              <TextBlock Text="⟳ " Foreground="{StaticResource Accent}">
+                <TextBlock.RenderTransform>
+                  <RotateTransform x:Name="SpinnerRotate" CenterX="7" CenterY="7"/>
+                </TextBlock.RenderTransform>
+                <TextBlock.Triggers>
+                  <EventTrigger RoutedEvent="Loaded">
+                    <BeginStoryboard>
+                      <Storyboard RepeatBehavior="Forever">
+                        <DoubleAnimation Storyboard.TargetName="SpinnerRotate"
+                                         Storyboard.TargetProperty="Angle"
+                                         From="0" To="360" Duration="0:0:1"/>
+                      </Storyboard>
+                    </BeginStoryboard>
+                  </EventTrigger>
+                </TextBlock.Triggers>
+              </TextBlock>
+              <TextBlock Text="Scanning…" Foreground="{StaticResource Accent}" FontSize="12"/>
+            </StackPanel>
+
+            <Separator Margin="0,16,0,14" Background="{StaticResource Border}"/>
+
+            <!-- Search -->
+            <TextBlock Text="SEARCH" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
+            <TextBox Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
+                     ToolTip="Filter by file name or extension"/>
+
+            <Separator Margin="0,16,0,14" Background="{StaticResource Border}"/>
+
+            <!-- Category filters -->
+            <TextBlock Text="CATEGORIES" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
+            <ItemsControl ItemsSource="{Binding CategoryFilters}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <CheckBox IsChecked="{Binding IsChecked}" Margin="0,3">
+                    <StackPanel Orientation="Horizontal">
+                      <Border Width="8" Height="8" CornerRadius="4" Margin="0,0,6,0"
+                              Background="{Binding Category, Converter={StaticResource CategoryColorConverter}}"/>
+                      <TextBlock Text="{Binding Label}" FontSize="12"/>
+                    </StackPanel>
+                  </CheckBox>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <Separator Margin="0,16,0,14" Background="{StaticResource Border}"/>
+
+            <!-- Extension filters (populated after scan) -->
+            <TextBlock Text="EXTENSIONS" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
+            <TextBlock Text="Run a scan to see extensions."
+                       FontSize="11" Foreground="{StaticResource TextSecondary}"
+                       Visibility="{Binding ExtensionFilters.Count, Converter={StaticResource InvBoolToVis}}"/>
+            <ItemsControl ItemsSource="{Binding ExtensionFilters}" MaxHeight="260">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <CheckBox IsChecked="{Binding IsChecked}" Margin="0,2">
+                    <TextBlock Text="{Binding Extension}" FontSize="12" FontFamily="Consolas"/>
+                  </CheckBox>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <Separator Margin="0,16,0,14" Background="{StaticResource Border}"/>
+            <Button Content="Clear Results" Style="{StaticResource SecondaryButton}"
+                    Height="30" Command="{Binding ClearCommand}"/>
+
+          </StackPanel>
+        </ScrollViewer>
+      </Border>
+
+      <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
+                    Background="{StaticResource Border}" Cursor="SizeWE"/>
+
+      <!-- ─── FILE LIST ─────────────────────────────────────── -->
+      <Grid Grid.Column="2">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="36"/>  <!-- results count bar -->
+          <RowDefinition Height="*"/>   <!-- grid -->
+        </Grid.RowDefinitions>
+
+        <!-- Count bar -->
+        <Border Grid.Row="0" Background="{StaticResource BgPanel}"
+                BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1" Padding="12,0">
+          <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <TextBlock Foreground="{StaticResource Accent}" FontWeight="SemiBold">
+              <Run Text="{Binding FileCount, Mode=OneWay}"/>
+            </TextBlock>
+            <TextBlock Text=" files" Foreground="{StaticResource TextSecondary}"/>
+          </StackPanel>
+        </Border>
+
+        <!-- DataGrid -->
+        <DataGrid Grid.Row="1"
+                  x:Name="FileGrid"
+                  ItemsSource="{Binding FileView}"
+                  SelectedItem="{Binding SelectedFile}"
+                  AutoGenerateColumns="False"
+                  CanUserAddRows="False"
+                  CanUserDeleteRows="False"
+                  CanUserResizeRows="False"
+                  CanUserSortColumns="False"
+                  GridLinesVisibility="Horizontal"
+                  HorizontalGridLinesBrush="{StaticResource Border}"
+                  Background="{StaticResource BgDark}"
+                  RowBackground="Transparent"
+                  AlternatingRowBackground="Transparent"
+                  BorderThickness="0"
+                  SelectionMode="Single"
+                  SelectionUnit="FullRow"
+                  EnableColumnVirtualization="True"
+                  EnableRowVirtualization="True"
+                  VirtualizingPanel.IsVirtualizing="True"
+                  VirtualizingPanel.VirtualizationMode="Recycling"
+                  ScrollViewer.VerticalScrollBarVisibility="Auto"
+                  Margin="0">
+
+          <DataGrid.Columns>
+
+            <!-- File name -->
+            <DataGridTemplateColumn MinWidth="180" Width="2*">
+              <DataGridTemplateColumn.HeaderTemplate>
+                <DataTemplate>
+                  <Button Style="{StaticResource SecondaryButton}" BorderThickness="0"
+                          Background="Transparent" Padding="0"
+                          Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                          CommandParameter="FileName">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="File name" FontSize="11" FontWeight="SemiBold"
+                                 Foreground="{StaticResource TextSecondary}"/>
+                      <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
+                        <TextBlock.Text>
+                          <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="FileName">
+                            <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                            <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                          </MultiBinding>
+                        </TextBlock.Text>
+                      </TextBlock>
+                    </StackPanel>
+                  </Button>
+                </DataTemplate>
+              </DataGridTemplateColumn.HeaderTemplate>
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding FileName}" Padding="6,4"
+                             TextTrimming="CharacterEllipsis" ToolTip="{Binding FullPath}"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+
+            <!-- Category badge -->
+            <DataGridTemplateColumn Width="90" MinWidth="80">
+              <DataGridTemplateColumn.HeaderTemplate>
+                <DataTemplate>
+                  <Button Style="{StaticResource SecondaryButton}" BorderThickness="0"
+                          Background="Transparent" Padding="0"
+                          Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                          CommandParameter="Category">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="Type" FontSize="11" FontWeight="SemiBold"
+                                 Foreground="{StaticResource TextSecondary}"/>
+                      <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
+                        <TextBlock.Text>
+                          <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="Category">
+                            <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                            <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                          </MultiBinding>
+                        </TextBlock.Text>
+                      </TextBlock>
+                    </StackPanel>
+                  </Button>
+                </DataTemplate>
+              </DataGridTemplateColumn.HeaderTemplate>
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <Border CornerRadius="4" Padding="5,2" Margin="4,3" HorizontalAlignment="Left"
+                          Background="{Binding Category, Converter={StaticResource CategoryColorConverter}}">
+                    <TextBlock Text="{Binding Category}" FontSize="10" FontWeight="SemiBold"
+                               Foreground="White"/>
+                  </Border>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+
+            <!-- Extension -->
+            <DataGridTemplateColumn Width="70" MinWidth="60">
+              <DataGridTemplateColumn.HeaderTemplate>
+                <DataTemplate>
+                  <Button Style="{StaticResource SecondaryButton}" BorderThickness="0"
+                          Background="Transparent" Padding="0"
+                          Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                          CommandParameter="Extension">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="Ext" FontSize="11" FontWeight="SemiBold"
+                                 Foreground="{StaticResource TextSecondary}"/>
+                      <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
+                        <TextBlock.Text>
+                          <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="Extension">
+                            <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                            <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                          </MultiBinding>
+                        </TextBlock.Text>
+                      </TextBlock>
+                    </StackPanel>
+                  </Button>
+                </DataTemplate>
+              </DataGridTemplateColumn.HeaderTemplate>
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding Extension}" Padding="6,4" FontFamily="Consolas"
+                             Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+
+            <!-- Size -->
+            <DataGridTemplateColumn Width="90" MinWidth="70">
+              <DataGridTemplateColumn.HeaderTemplate>
+                <DataTemplate>
+                  <Button Style="{StaticResource SecondaryButton}" BorderThickness="0"
+                          Background="Transparent" Padding="0"
+                          Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                          CommandParameter="FileSizeBytes">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="Size" FontSize="11" FontWeight="SemiBold"
+                                 Foreground="{StaticResource TextSecondary}"/>
+                      <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
+                        <TextBlock.Text>
+                          <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="FileSizeBytes">
+                            <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                            <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                          </MultiBinding>
+                        </TextBlock.Text>
+                      </TextBlock>
+                    </StackPanel>
+                  </Button>
+                </DataTemplate>
+              </DataGridTemplateColumn.HeaderTemplate>
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding FileSizeBytes, Converter={StaticResource FileSizeConverter}}"
+                             Padding="6,4" HorizontalAlignment="Right"
+                             Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+
+            <!-- Date modified -->
+            <DataGridTemplateColumn Width="150" MinWidth="120">
+              <DataGridTemplateColumn.HeaderTemplate>
+                <DataTemplate>
+                  <Button Style="{StaticResource SecondaryButton}" BorderThickness="0"
+                          Background="Transparent" Padding="0"
+                          Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                          CommandParameter="LastModified">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="Modified" FontSize="11" FontWeight="SemiBold"
+                                 Foreground="{StaticResource TextSecondary}"/>
+                      <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
+                        <TextBlock.Text>
+                          <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="LastModified">
+                            <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                            <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                          </MultiBinding>
+                        </TextBlock.Text>
+                      </TextBlock>
+                    </StackPanel>
+                  </Button>
+                </DataTemplate>
+              </DataGridTemplateColumn.HeaderTemplate>
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding LastModified, Converter={StaticResource DateConverter}}"
+                             Padding="6,4" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+
+            <!-- Full path -->
+            <DataGridTemplateColumn Width="3*" MinWidth="200">
+              <DataGridTemplateColumn.HeaderTemplate>
+                <DataTemplate>
+                  <Button Style="{StaticResource SecondaryButton}" BorderThickness="0"
+                          Background="Transparent" Padding="0"
+                          Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                          CommandParameter="FullPath">
+                    <StackPanel Orientation="Horizontal">
+                      <TextBlock Text="Path" FontSize="11" FontWeight="SemiBold"
+                                 Foreground="{StaticResource TextSecondary}"/>
+                      <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
+                        <TextBlock.Text>
+                          <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="FullPath">
+                            <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                            <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                          </MultiBinding>
+                        </TextBlock.Text>
+                      </TextBlock>
+                    </StackPanel>
+                  </Button>
+                </DataTemplate>
+              </DataGridTemplateColumn.HeaderTemplate>
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding FullPath}" Padding="6,4"
+                             TextTrimming="CharacterEllipsis" ToolTip="{Binding FullPath}"
+                             Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+
+          </DataGrid.Columns>
+        </DataGrid>
+
+        <!-- Empty state -->
+        <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Visibility="{Binding IsNotScanning, Converter={StaticResource BoolToVis}}">
+          <StackPanel.Style>
+            <Style TargetType="StackPanel">
+              <Setter Property="Visibility" Value="Collapsed"/>
+              <Style.Triggers>
+                <DataTrigger Binding="{Binding FileCount}" Value="0">
+                  <Setter Property="Visibility" Value="Visible"/>
+                </DataTrigger>
+              </Style.Triggers>
+            </Style>
+          </StackPanel.Style>
+          <TextBlock Text="📂" FontSize="48" HorizontalAlignment="Center" Margin="0,0,0,12"/>
+          <TextBlock Text="No files loaded" FontSize="18" FontWeight="SemiBold"
+                     HorizontalAlignment="Center" Margin="0,0,0,6"/>
+          <TextBlock Text="Choose a folder and click Scan Folder to begin."
+                     Foreground="{StaticResource TextSecondary}" HorizontalAlignment="Center"/>
+        </StackPanel>
+
+      </Grid>
+
+      <GridSplitter Grid.Column="3" Width="4" HorizontalAlignment="Stretch"
+                    Background="{StaticResource Border}" Cursor="SizeWE"/>
+
+      <!-- ─── PREVIEW PANEL ─────────────────────────────────── -->
+      <Border Grid.Column="4" Background="{StaticResource BgPanel}"
+              BorderBrush="{StaticResource Border}" BorderThickness="1,0,0,0">
+        <Grid>
+
+          <!-- No selection placeholder -->
+          <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                      Visibility="{Binding ShowPreview, Converter={StaticResource InvBoolToVis}}">
+            <TextBlock Text="🖼" FontSize="36" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+            <TextBlock Text="Select an image file" FontSize="13"
+                       Foreground="{StaticResource TextSecondary}" HorizontalAlignment="Center"/>
+            <TextBlock Text="to preview it here." FontSize="13"
+                       Foreground="{StaticResource TextSecondary}" HorizontalAlignment="Center"/>
+          </StackPanel>
+
+          <!-- Preview content -->
+          <Grid Visibility="{Binding ShowPreview, Converter={StaticResource BoolToVis}}">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Image -->
+            <Border Grid.Row="0" Margin="12,12,12,8" CornerRadius="8"
+                    Background="{StaticResource BgMid}">
+              <Image Source="{Binding PreviewImage}"
+                     Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"
+                     Margin="8"/>
+            </Border>
+
+            <!-- File metadata under the image -->
+            <Border Grid.Row="1" Margin="12,0,12,12" Padding="12"
+                    Background="{StaticResource BgMid}" CornerRadius="8">
+              <StackPanel>
+                <TextBlock Text="{Binding SelectedFile.FileName}"
+                           FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                <Grid Margin="0,2">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Size" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <TextBlock Grid.Column="1" FontSize="12"
+                             Text="{Binding SelectedFile.FileSizeBytes, Converter={StaticResource FileSizeConverter}}"/>
+                </Grid>
+                <Grid Margin="0,2">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Modified" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <TextBlock Grid.Column="1" FontSize="12"
+                             Text="{Binding SelectedFile.LastModified, Converter={StaticResource DateConverter}}"/>
+                </Grid>
+                <Grid Margin="0,2">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="MIME" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <TextBlock Grid.Column="1" FontSize="11" FontFamily="Consolas"
+                             Text="{Binding SelectedFile.DetectedMimeType}"
+                             TextWrapping="Wrap" Foreground="{StaticResource TextSecondary}"/>
+                </Grid>
+                <Grid Margin="0,6,0,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Path" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <TextBlock Grid.Column="1" FontSize="11" FontFamily="Consolas"
+                             Text="{Binding SelectedFile.FullPath}"
+                             TextWrapping="Wrap" Foreground="{StaticResource TextSecondary}"/>
+                </Grid>
+              </StackPanel>
+            </Border>
+          </Grid>
+
+        </Grid>
+      </Border>
+
+    </Grid>
+
+    <!-- ═══════════════════ STATUS BAR ═══════════════════ -->
+    <Border Grid.Row="2" Background="{StaticResource BgPanel}"
+            BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0" Padding="14,0">
+      <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center"
+                 FontSize="12" Foreground="{StaticResource TextSecondary}"/>
+    </Border>
+
+  </Grid>
+</Window>
