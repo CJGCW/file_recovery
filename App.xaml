@@ -184,6 +184,60 @@
         <Setter Property="Width"      Value="6"/>
       </Style>
 
+      <!-- ── Expander (sidebar sections) ─────────────────────────────── -->
+      <Style TargetType="Expander">
+        <Setter Property="Background"      Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="IsExpanded"      Value="True"/>
+        <Setter Property="Padding"         Value="0"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="Expander">
+              <StackPanel>
+                <!-- Toggle header row -->
+                <ToggleButton
+                    IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                    Content="{TemplateBinding Header}"
+                    Background="Transparent" BorderThickness="0"
+                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                    Cursor="Hand" Padding="0" FocusVisualStyle="{x:Null}">
+                  <ToggleButton.Template>
+                    <ControlTemplate TargetType="ToggleButton">
+                      <Border Background="Transparent">
+                        <Grid>
+                          <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition Width="*"/>
+                          </Grid.ColumnDefinitions>
+                          <TextBlock x:Name="Arrow" Grid.Column="0"
+                                     Text="▶" FontSize="8"
+                                     Foreground="{StaticResource Accent}"
+                                     VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                          <ContentPresenter Grid.Column="1" VerticalAlignment="Center"
+                                            Content="{TemplateBinding Content}"/>
+                        </Grid>
+                      </Border>
+                      <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                          <Setter TargetName="Arrow" Property="Text" Value="▼"/>
+                        </Trigger>
+                      </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                  </ToggleButton.Template>
+                </ToggleButton>
+                <!-- Expandable body -->
+                <ContentPresenter x:Name="Body" Visibility="Collapsed"/>
+              </StackPanel>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsExpanded" Value="True">
+                  <Setter TargetName="Body" Property="Visibility" Value="Visible"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+
     </ResourceDictionary>
   </Application.Resources>
 </Application>

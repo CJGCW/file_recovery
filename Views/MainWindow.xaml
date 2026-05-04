@@ -180,42 +180,82 @@
 
             <Separator Margin="0,16,0,14" Background="{StaticResource Border}"/>
 
-            <!-- Category filters -->
-            <TextBlock Text="CATEGORIES" FontSize="10" FontWeight="SemiBold"
-                       Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
-            <ItemsControl ItemsSource="{Binding CategoryFilters}">
-              <ItemsControl.ItemTemplate>
-                <DataTemplate>
-                  <CheckBox IsChecked="{Binding IsChecked}" Margin="0,3">
-                    <StackPanel Orientation="Horizontal">
-                      <Border Width="8" Height="8" CornerRadius="4" Margin="0,0,6,0"
-                              Background="{Binding Category, Converter={StaticResource CategoryColorConverter}}"/>
-                      <TextBlock Text="{Binding Label}" FontSize="12"/>
-                    </StackPanel>
-                  </CheckBox>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
+            <!-- ▼ CATEGORIES -->
+            <Expander>
+              <Expander.Header>
+                <TextBlock Text="CATEGORIES" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextSecondary}"/>
+              </Expander.Header>
+              <ItemsControl ItemsSource="{Binding CategoryFilters}" Margin="0,6,0,0">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <CheckBox IsChecked="{Binding IsChecked}" Margin="0,3">
+                      <StackPanel Orientation="Horizontal">
+                        <Border Width="8" Height="8" CornerRadius="4" Margin="0,0,6,0"
+                                Background="{Binding Category, Converter={StaticResource CategoryColorConverter}}"/>
+                        <TextBlock Text="{Binding Label}" FontSize="12"/>
+                      </StackPanel>
+                    </CheckBox>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </Expander>
 
-            <Separator Margin="0,16,0,14" Background="{StaticResource Border}"/>
+            <!-- ▼ IMAGE GROUPS (hidden until images are scanned) -->
+            <StackPanel>
+              <StackPanel.Style>
+                <Style TargetType="StackPanel">
+                  <Setter Property="Visibility" Value="Visible"/>
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding ImageGroupFilters.Count}" Value="0">
+                      <Setter Property="Visibility" Value="Collapsed"/>
+                    </DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </StackPanel.Style>
+              <Separator Margin="0,14,0,14" Background="{StaticResource Border}"/>
+              <Expander>
+                <Expander.Header>
+                  <TextBlock Text="IMAGE GROUPS" FontSize="10" FontWeight="SemiBold"
+                             Foreground="{StaticResource TextSecondary}"/>
+                </Expander.Header>
+                <ItemsControl ItemsSource="{Binding ImageGroupFilters}" Margin="0,6,0,0">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <CheckBox IsChecked="{Binding IsChecked}" Margin="0,3">
+                        <TextBlock Text="{Binding DisplayLabel}" FontSize="12"/>
+                      </CheckBox>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </Expander>
+            </StackPanel>
 
-            <!-- Extension filters (populated after scan) -->
-            <TextBlock Text="EXTENSIONS" FontSize="10" FontWeight="SemiBold"
-                       Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
-            <TextBlock Text="Run a scan to see extensions."
-                       FontSize="11" Foreground="{StaticResource TextSecondary}"
-                       Visibility="{Binding ExtensionFilters.Count, Converter={StaticResource InvBoolToVis}}"/>
-            <ItemsControl ItemsSource="{Binding ExtensionFilters}" MaxHeight="260">
-              <ItemsControl.ItemTemplate>
-                <DataTemplate>
-                  <CheckBox IsChecked="{Binding IsChecked}" Margin="0,2">
-                    <TextBlock Text="{Binding Extension}" FontSize="12" FontFamily="Consolas"/>
-                  </CheckBox>
-                </DataTemplate>
-              </ItemsControl.ItemTemplate>
-            </ItemsControl>
+            <Separator Margin="0,14,0,14" Background="{StaticResource Border}"/>
 
-            <Separator Margin="0,16,0,14" Background="{StaticResource Border}"/>
+            <!-- ▶ EXTENSIONS (starts collapsed — can be long) -->
+            <Expander IsExpanded="False">
+              <Expander.Header>
+                <TextBlock Text="EXTENSIONS" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextSecondary}"/>
+              </Expander.Header>
+              <StackPanel Margin="0,6,0,0">
+                <TextBlock Text="Run a scan to see extensions."
+                           FontSize="11" Foreground="{StaticResource TextSecondary}"
+                           Visibility="{Binding ExtensionFilters.Count, Converter={StaticResource InvBoolToVis}}"/>
+                <ItemsControl ItemsSource="{Binding ExtensionFilters}" MaxHeight="260">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <CheckBox IsChecked="{Binding IsChecked}" Margin="0,2">
+                        <TextBlock Text="{Binding Extension}" FontSize="12" FontFamily="Consolas"/>
+                      </CheckBox>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </StackPanel>
+            </Expander>
+
+            <Separator Margin="0,14,0,14" Background="{StaticResource Border}"/>
             <Button Content="Clear Results" Style="{StaticResource SecondaryButton}"
                     Height="30" Command="{Binding ClearCommand}" Margin="0,0,0,6"/>
             <Button Content="Find Duplicates" Style="{StaticResource SecondaryButton}"

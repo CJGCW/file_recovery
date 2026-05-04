@@ -46,8 +46,9 @@ public class MainViewModel : INotifyPropertyChanged
     private readonly ObservableCollection<FileRecord> _allFiles = [];
     public  ICollectionView FileView { get; }
 
-    public ObservableCollection<CategoryFilter> CategoryFilters { get; } = [];
-    public ObservableCollection<ExtensionFilter> ExtensionFilters { get; } = [];
+    public ObservableCollection<CategoryFilter>  CategoryFilters   { get; } = [];
+    public ObservableCollection<ExtensionFilter> ExtensionFilters  { get; } = [];
+    public ObservableCollection<ImageGroupFilter> ImageGroupFilters { get; } = [];
 
     // ── Constructor ──────────────────────────────────────────────────────────
 
@@ -296,6 +297,7 @@ public class MainViewModel : INotifyPropertyChanged
 
     private async Task RunRecognitionWorkerAsync(Channel<FileRecord> queue, CancellationToken ct)
     {
+        bool anyFaceFound = false;
         try
         {
             await _suggestionService.EnsureReadyAsync(
@@ -306,6 +308,12 @@ public class MainViewModel : INotifyPropertyChanged
                 var suggestions = await _suggestionService.GetSuggestionsAsync(record, ct);
                 _suggestionCache[record.Id] = suggestions;
 
+                if (suggestions.Any(s => s.Source == "face") && record.Category == FileCategory.Image)
+                {
+                    record.ImageGroup = ImageSubcategory.PersonPhoto;
+                    anyFaceFound = true;
+                }
+
                 if (suggestions.Count > 0)
                     Application.Current.Dispatcher.Invoke(() =>
                     {
@@ -313,6 +321,13 @@ public class MainViewModel : INotifyPropertyChanged
                             CurrentSuggestions = suggestions;
                     });
             }
+
+            if (anyFaceFound)
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    PopulateImageGroupFilters();
+                    FileView.Refresh();
+                });
         }
         catch (OperationCanceledException) { }
         catch { }
@@ -336,6 +351,7 @@ public class MainViewModel : INotifyPropertyChanged
         _allFiles.Clear();
         _suggestionCache.Clear();
         CurrentSuggestions  = [];
+        ImageGroupFilters.Clear();
         PreviewImage        = null;
         ShowImagePreview    = false;
         ShowDocumentPreview = false;
@@ -694,6 +710,26 @@ public class MainViewModel : INotifyPropertyChanged
                 return false;
         }
 
+        if (CategoryFilters.Any(f => !f.IsChecked))
+        {
+            var allowed = CategoryFilters.Where(f => f.IsChecked).Select(f => f.Category).ToHashSet();
+            if (!allowed.Contains(r.Category)) return false;
+        }
+
+        if (ExtensionFilters.Count > 0 && ExtensionFilters.Any(f => !f.IsChecked))
+        {
+            var allowed = ExtensionFilters.Where(f => f.IsChecked)
+                                          .Select(f => f.Extension)
+                                          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (!allowed.Contains(r.Extension)) return false;
+        }
+
+        if (r.Category == FileCategory.Image && ImageGroupFilters.Count > 0 && ImageGroupFilters.Any(f => !f.IsChecked))
+        {
+            var allowed = ImageGroupFilters.Where(f => f.IsChecked).Select(f => f.Group).ToHashSet();
+            if (!allowed.Contains(r.ImageGroup)) return false;
+        }
+
         return true;
     }
 
@@ -793,6 +829,24 @@ public class MainViewModel : INotifyPropertyChanged
             ExtensionFilters.Add(new ExtensionFilter(ext, onChanged: () => FileView.Refresh()));
     }
 
+    public void PopulateImageGroupFilters()
+    {
+        var prevState = ImageGroupFilters.ToDictionary(f => f.Group, f => f.IsChecked);
+
+        ImageGroupFilters.Clear();
+
+        foreach (var g in _allFiles
+            .Where(f => f.Category == FileCategory.Image)
+            .GroupBy(f => f.ImageGroup)
+            .OrderBy(g => (int)g.Key))
+        {
+            var filter = new ImageGroupFilter(g.Key, g.Count(), onChanged: () => FileView.Refresh());
+            if (prevState.TryGetValue(g.Key, out var wasChecked) && !wasChecked)
+                filter.SetCheckedSilent(false);
+            ImageGroupFilters.Add(filter);
+        }
+    }
+
     // ── INotifyPropertyChanged ───────────────────────────────────────────────
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -837,6 +891,52 @@ public class ExtensionFilter : INotifyPropertyChanged
 
     public ExtensionFilter(string extension, Action onChanged)
     { Extension = extension; _onChanged = onChanged; }
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
+
+public class ImageGroupFilter : INotifyPropertyChanged
+{
+    private bool _isChecked = true;
+    private int  _count;
+    private readonly Action _onChanged;
+
+    public ImageSubcategory Group { get; }
+
+    public string Label => Group switch
+    {
+        ImageSubcategory.Icon        => "Icons",
+        ImageSubcategory.Screenshot  => "Screenshots",
+        ImageSubcategory.Wallpaper   => "Wallpapers",
+        ImageSubcategory.GameAsset   => "Game Assets",
+        ImageSubcategory.PersonPhoto => "People",
+        _                            => "Other Images",
+    };
+
+    public int Count
+    {
+        get => _count;
+        set
+        {
+            _count = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Count)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DisplayLabel)));
+        }
+    }
+
+    public string DisplayLabel => $"{Label} ({Count:N0})";
+
+    public bool IsChecked
+    {
+        get => _isChecked;
+        set { _isChecked = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsChecked))); _onChanged(); }
+    }
+
+    // Set checked state without firing the filter-refresh callback (used during repopulation)
+    internal void SetCheckedSilent(bool value) => _isChecked = value;
+
+    public ImageGroupFilter(ImageSubcategory group, int count, Action onChanged)
+    { Group = group; _count = count; _onChanged = onChanged; }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 }

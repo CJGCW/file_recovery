@@ -99,7 +99,10 @@ public class FileScanner
                                        : null,
                 Duration         = detected.Value.Category is FileCategory.Video or FileCategory.Audio
                                        ? MediaDurationReader.Read(filePath)
-                                       : null
+                                       : null,
+                ImageGroup       = detected.Value.Category == FileCategory.Image
+                                       ? ImageClassifier.Classify(filePath, info.Extension)
+                                       : ImageSubcategory.None
             };
         }
         catch

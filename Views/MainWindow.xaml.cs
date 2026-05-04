@@ -17,7 +17,10 @@ public partial class MainWindow : Window
         Vm.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName == nameof(MainViewModel.IsScanning) && !Vm.IsScanning)
+            {
                 Vm.PopulateExtensionFilters();
+                Vm.PopulateImageGroupFilters();
+            }
         };
     }
 

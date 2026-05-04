@@ -19,6 +19,7 @@ public class FileRecord : INotifyPropertyChanged
     public string?          DocumentTitle   { get; set; }
     public DocumentContent? DocumentContent { get; set; }
     public TimeSpan?        Duration        { get; set; }
+    public ImageSubcategory ImageGroup      { get; set; }
 
     public string FullPath
     {
