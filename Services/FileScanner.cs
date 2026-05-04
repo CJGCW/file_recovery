@@ -10,6 +10,8 @@ namespace FileRecoveryParser.Services;
 /// </summary>
 public class FileScanner
 {
+    private static long _idCounter;
+
     private readonly FileTypeDetector _detector = new();
     private readonly int _parallelism;
 
@@ -22,7 +24,14 @@ public class FileScanner
         string rootPath,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var files = Directory.EnumerateFiles(rootPath, "*", SearchOption.AllDirectories);
+        var files = Directory.EnumerateFiles(rootPath, "*",
+            new EnumerationOptions
+            {
+                RecurseSubdirectories  = true,
+                IgnoreInaccessible     = true,
+                ReturnSpecialDirectories = false,
+                AttributesToSkip       = FileAttributes.ReparsePoint // skip symlink loops
+            });
 
         var channel = System.Threading.Channels.Channel.CreateBounded<FileRecord>(
             new System.Threading.Channels.BoundedChannelOptions(2000)
@@ -73,6 +82,7 @@ public class FileScanner
 
             return new FileRecord
             {
+                Id               = Interlocked.Increment(ref _idCounter),
                 FullPath         = filePath,
                 FileName         = info.Name,
                 Extension        = info.Extension.ToLowerInvariant(),
@@ -80,7 +90,16 @@ public class FileScanner
                 Category         = detected.Value.Category,
                 FileSizeBytes    = info.Length,
                 LastModified     = info.LastWriteTimeUtc,
-                ScannedAt        = DateTime.UtcNow
+                ScannedAt        = DateTime.UtcNow,
+                DocumentTitle    = detected.Value.Category == FileCategory.Document
+                                       ? DocumentMetadataReader.ReadTitle(filePath)
+                                       : null,
+                DocumentContent  = detected.Value.Category == FileCategory.Document
+                                       ? DocumentMetadataReader.Read(filePath)
+                                       : null,
+                Duration         = detected.Value.Category is FileCategory.Video or FileCategory.Audio
+                                       ? MediaDurationReader.Read(filePath)
+                                       : null
             };
         }
         catch

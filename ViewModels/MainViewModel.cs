@@ -1,14 +1,18 @@
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
+using System.Threading.Channels;
 using System.Windows;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
-using FileRecoveryParser.Data;
 using FileRecoveryParser.Models;
 using FileRecoveryParser.Services;
+using FileRecoveryParser.Views;
+using Microsoft.Win32;
 
 namespace FileRecoveryParser.ViewModels;
 
@@ -22,10 +26,20 @@ public class MainViewModel : INotifyPropertyChanged
     private string _statusText = "Select a folder to begin.";
     private FileRecord? _selectedFile;
     private BitmapImage? _previewImage;
-    private bool _showPreview;
+    private bool    _showImagePreview;
+    private bool    _showDocumentPreview;
+    private string? _previewFilePath;
+    private bool    _isPreviewMaximized;
+    private bool    _isDetectingDuplicates;
     private string _sortColumn = nameof(FileRecord.FileName);
     private ListSortDirection _sortDirection = ListSortDirection.Ascending;
     private CancellationTokenSource? _scanCts;
+    private IList<SuggestionResult> _currentSuggestions = [];
+
+    // ── Suggestion pipeline ──────────────────────────────────────────────────
+    private readonly SuggestionService _suggestionService;
+    private readonly ConcurrentDictionary<long, IList<SuggestionResult>> _suggestionCache = new();
+    private Channel<FileRecord>? _recognitionQueue;
 
     // ── Collections ──────────────────────────────────────────────────────────
 
@@ -39,14 +53,24 @@ public class MainViewModel : INotifyPropertyChanged
 
     public MainViewModel()
     {
+        _suggestionService = new SuggestionService(new PersonStore());
+
         FileView = CollectionViewSource.GetDefaultView(_allFiles);
         FileView.Filter = ApplyFilter;
         ((ICollectionView)FileView).CollectionChanged += (_, _) => OnPropertyChanged(nameof(FileCount));
 
-        ScanCommand   = new RelayCommand(_ => _ is string s ? StartScan(s) : StartScan(FolderPath), _ => !IsScanning);
-        CancelCommand = new RelayCommand(_ => _scanCts?.Cancel(),                                    _ => IsScanning);
-        SortCommand   = new RelayCommand(col => ApplySort(col as string ?? string.Empty));
-        ClearCommand  = new RelayCommand(_ => ClearResults(), _ => _allFiles.Count > 0);
+        ScanCommand            = new RelayCommand(_ => { if (_ is string s) StartScan(s); else StartScan(FolderPath); }, _ => !IsScanning);
+        CancelCommand          = new RelayCommand(_ => _scanCts?.Cancel(), _ => IsScanning);
+        SortCommand            = new RelayCommand(col => ApplySort(col as string ?? string.Empty));
+        ClearCommand           = new RelayCommand(_ => ClearResults(), _ => _allFiles.Count > 0);
+        SelectAllCommand       = new RelayCommand(_ => ToggleSelectAll());
+        MoveCommand            = new RelayCommand(_ => ExecuteMove(),   _ => SelectedCount > 0);
+        RenameCommand          = new RelayCommand(_ => ExecuteRename(), _ => SelectedCount > 0);
+        DeleteCommand          = new RelayCommand(_ => ExecuteDelete(), _ => SelectedCount > 0);
+        ApplySuggestionCommand         = new RelayCommand(s => ApplySuggestion(s as SuggestionResult));
+        TogglePreviewMaximizeCommand   = new RelayCommand(_ => IsPreviewMaximized = !IsPreviewMaximized);
+        FindDuplicatesCommand         = new RelayCommand(_ => FindDuplicatesAsync(),
+                                            _ => _allFiles.Count > 0 && !IsScanning && !_isDetectingDuplicates);
 
         InitialiseCategoryFilters();
     }
@@ -81,6 +105,34 @@ public class MainViewModel : INotifyPropertyChanged
 
     public int FileCount => FileView.Cast<object>().Count();
 
+    public int SelectedCount => _allFiles.Count(f => f.IsSelected);
+
+    public bool? AllSelected
+    {
+        get
+        {
+            var visible = FileView.Cast<FileRecord>().ToList();
+            if (visible.Count == 0) return false;
+            var checkedCount = visible.Count(f => f.IsSelected);
+            if (checkedCount == 0) return false;
+            if (checkedCount == visible.Count) return true;
+            return null;
+        }
+        set
+        {
+            var check = value ?? false;
+            foreach (var f in FileView.Cast<FileRecord>())
+                f.IsSelected = check;
+            RaiseSelectionChanged();
+        }
+    }
+
+    public IList<SuggestionResult> CurrentSuggestions
+    {
+        get => _currentSuggestions;
+        private set { _currentSuggestions = value; OnPropertyChanged(); }
+    }
+
     public FileRecord? SelectedFile
     {
         get => _selectedFile;
@@ -89,6 +141,9 @@ public class MainViewModel : INotifyPropertyChanged
             _selectedFile = value;
             OnPropertyChanged();
             LoadPreview(value);
+            CurrentSuggestions = value is not null
+                ? _suggestionCache.GetValueOrDefault(value.Id, [])
+                : [];
         }
     }
 
@@ -98,10 +153,30 @@ public class MainViewModel : INotifyPropertyChanged
         set { _previewImage = value; OnPropertyChanged(); }
     }
 
-    public bool ShowPreview
+    public bool ShowImagePreview
     {
-        get => _showPreview;
-        set { _showPreview = value; OnPropertyChanged(); }
+        get => _showImagePreview;
+        set { _showImagePreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowAnyPreview)); }
+    }
+
+    public bool ShowDocumentPreview
+    {
+        get => _showDocumentPreview;
+        set { _showDocumentPreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowAnyPreview)); }
+    }
+
+    public bool ShowAnyPreview => _showImagePreview || _showDocumentPreview;
+
+    public bool IsPreviewMaximized
+    {
+        get => _isPreviewMaximized;
+        set { _isPreviewMaximized = value; OnPropertyChanged(); }
+    }
+
+    public string? PreviewFilePath
+    {
+        get => _previewFilePath;
+        set { _previewFilePath = value; OnPropertyChanged(); }
     }
 
     public string SortColumn
@@ -118,10 +193,17 @@ public class MainViewModel : INotifyPropertyChanged
 
     // ── Commands ─────────────────────────────────────────────────────────────
 
-    public ICommand ScanCommand   { get; }
-    public ICommand CancelCommand { get; }
-    public ICommand SortCommand   { get; }
-    public ICommand ClearCommand  { get; }
+    public ICommand ScanCommand            { get; }
+    public ICommand CancelCommand          { get; }
+    public ICommand SortCommand            { get; }
+    public ICommand ClearCommand           { get; }
+    public ICommand SelectAllCommand       { get; }
+    public ICommand MoveCommand            { get; }
+    public ICommand RenameCommand          { get; }
+    public ICommand ApplySuggestionCommand       { get; }
+    public ICommand TogglePreviewMaximizeCommand { get; }
+    public ICommand DeleteCommand                { get; }
+    public ICommand FindDuplicatesCommand        { get; }
 
     // ── Scanning ─────────────────────────────────────────────────────────────
 
@@ -141,13 +223,20 @@ public class MainViewModel : INotifyPropertyChanged
         _scanCts = new CancellationTokenSource();
         var ct   = _scanCts.Token;
 
-        // Collect active extension filters (empty set = all)
+        // Fresh recognition queue for this scan
+        _recognitionQueue?.Writer.TryComplete();
+        _recognitionQueue = Channel.CreateBounded<FileRecord>(
+            new BoundedChannelOptions(500) { FullMode = BoundedChannelFullMode.DropWrite });
+        var queue = _recognitionQueue;
+
+        // Start background recognition worker
+        _ = Task.Run(() => RunRecognitionWorkerAsync(queue, ct), CancellationToken.None);
+
         var allowedExtensions = ExtensionFilters
             .Where(f => f.IsChecked)
             .Select(f => f.Extension)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        // Collect active category filters
         var allowedCategories = CategoryFilters
             .Where(f => f.IsChecked)
             .Select(f => f.Category)
@@ -164,12 +253,14 @@ public class MainViewModel : INotifyPropertyChanged
                 {
                     if (ct.IsCancellationRequested) break;
 
-                    // Apply pre-scan category/extension filter so we don't load unwanted files
                     if (allowedCategories.Count > 0 && !allowedCategories.Contains(record.Category))
                     { skipped++; continue; }
 
                     if (allowedExtensions.Count > 0 && !allowedExtensions.Contains(record.Extension))
                     { skipped++; continue; }
+
+                    record.PropertyChanged += Record_PropertyChanged;
+                    queue.Writer.TryWrite(record);
 
                     found++;
                     Application.Current.Dispatcher.Invoke(() =>
@@ -179,6 +270,8 @@ public class MainViewModel : INotifyPropertyChanged
                             StatusText = $"Found {found:N0} files…";
                     });
                 }
+
+                queue.Writer.TryComplete();
 
                 Application.Current.Dispatcher.Invoke(() =>
                 {
@@ -191,6 +284,7 @@ public class MainViewModel : INotifyPropertyChanged
             }
             catch (Exception ex)
             {
+                queue.Writer.TryComplete();
                 Application.Current.Dispatcher.Invoke(() =>
                 {
                     StatusText = $"Error: {ex.Message}";
@@ -200,13 +294,390 @@ public class MainViewModel : INotifyPropertyChanged
         }, ct);
     }
 
+    private async Task RunRecognitionWorkerAsync(Channel<FileRecord> queue, CancellationToken ct)
+    {
+        try
+        {
+            await _suggestionService.EnsureReadyAsync(
+                msg => Application.Current.Dispatcher.Invoke(() => StatusText = msg), ct);
+
+            await foreach (var record in queue.Reader.ReadAllAsync(ct))
+            {
+                var suggestions = await _suggestionService.GetSuggestionsAsync(record, ct);
+                _suggestionCache[record.Id] = suggestions;
+
+                if (suggestions.Count > 0)
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        if (SelectedFile?.Id == record.Id)
+                            CurrentSuggestions = suggestions;
+                    });
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch { }
+    }
+
+    private void Record_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(FileRecord.IsSelected))
+            RaiseSelectionChanged();
+    }
+
+    private void RaiseSelectionChanged()
+    {
+        OnPropertyChanged(nameof(SelectedCount));
+        OnPropertyChanged(nameof(AllSelected));
+    }
+
     private void ClearResults()
     {
+        foreach (var r in _allFiles) r.PropertyChanged -= Record_PropertyChanged;
         _allFiles.Clear();
-        PreviewImage = null;
-        ShowPreview  = false;
-        SelectedFile = null;
+        _suggestionCache.Clear();
+        CurrentSuggestions  = [];
+        PreviewImage        = null;
+        ShowImagePreview    = false;
+        ShowDocumentPreview = false;
+        PreviewFilePath     = null;
+        SelectedFile        = null;
         OnPropertyChanged(nameof(FileCount));
+        RaiseSelectionChanged();
+    }
+
+    // ── Selection ─────────────────────────────────────────────────────────────
+
+    private void ToggleSelectAll()
+    {
+        var all = AllSelected == true;
+        foreach (var f in FileView.Cast<FileRecord>())
+            f.IsSelected = !all;
+        RaiseSelectionChanged();
+    }
+
+    // ── Move ─────────────────────────────────────────────────────────────────
+
+    private void ExecuteMove()
+    {
+        var selected = _allFiles.Where(f => f.IsSelected).ToList();
+        if (selected.Count == 0) return;
+
+        var dialog = new OpenFolderDialog { Title = "Choose destination folder" };
+        if (dialog.ShowDialog() != true) return;
+
+        var dest    = dialog.FolderName;
+        int moved   = 0;
+        var errors  = new List<string>();
+
+        foreach (var record in selected)
+        {
+            try
+            {
+                var newPath = Path.Combine(dest, record.FileName);
+                if (File.Exists(newPath))
+                    newPath = MakeUniquePath(newPath);
+
+                File.Move(record.FullPath, newPath);
+
+                _suggestionService.NotifyFileMoved(
+                    record, dest, null, _suggestionCache.GetValueOrDefault(record.Id, []));
+
+                var info            = new FileInfo(newPath);
+                record.FullPath     = newPath;
+                record.LastModified = info.LastWriteTimeUtc;
+                record.IsSelected   = false;
+                moved++;
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"{record.FileName}: {ex.Message}");
+            }
+        }
+
+        StatusText = errors.Count == 0
+            ? $"Moved {moved} file(s) to {dest}."
+            : $"Moved {moved} file(s); {errors.Count} error(s). First: {errors[0]}";
+    }
+
+    // ── Rename ────────────────────────────────────────────────────────────────
+
+    private void ExecuteRename()
+    {
+        var selected = _allFiles.Where(f => f.IsSelected).ToList();
+        if (selected.Count == 0) return;
+
+        var dialog = new RenameDialog(selected) { Owner = Application.Current.MainWindow };
+        dialog.ShowDialog();
+        if (!dialog.Confirmed) return;
+
+        var pattern = dialog.ResultPattern;
+        int renamed = 0;
+        var errors  = new List<string>();
+
+        var destFolder = dialog.DestinationFolder;
+
+        for (int i = 0; i < selected.Count; i++)
+        {
+            var record = selected[i];
+            try
+            {
+                var newName = selected.Count == 1
+                    ? pattern + record.Extension
+                    : ExpandPattern(pattern, record, i + 1);
+
+                var targetDir = destFolder ?? Path.GetDirectoryName(record.FullPath)!;
+                var newPath   = Path.Combine(targetDir, newName);
+                if (File.Exists(newPath) && !newPath.Equals(record.FullPath, StringComparison.OrdinalIgnoreCase))
+                    newPath = MakeUniquePath(newPath);
+
+                File.Move(record.FullPath, newPath);
+
+                _suggestionService.NotifyFileMoved(
+                    record, targetDir, newName, _suggestionCache.GetValueOrDefault(record.Id, []));
+
+                record.FullPath   = newPath;
+                record.FileName   = Path.GetFileName(newPath);
+                record.IsSelected = false;
+                renamed++;
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"{record.FileName}: {ex.Message}");
+            }
+        }
+
+        StatusText = errors.Count == 0
+            ? $"Renamed {renamed} file(s)."
+            : $"Renamed {renamed} file(s); {errors.Count} error(s). First: {errors[0]}";
+    }
+
+    // ── Delete ────────────────────────────────────────────────────────────────
+
+    private void ExecuteDelete()
+    {
+        var selected = _allFiles.Where(f => f.IsSelected).ToList();
+        if (selected.Count == 0) return;
+
+        var preview = selected.Count == 1
+            ? $"\"{selected[0].FileName}\""
+            : $"{selected.Count} files";
+
+        var answer = MessageBox.Show(
+            $"Move {preview} to the Recycle Bin?",
+            "Confirm Delete",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (answer != MessageBoxResult.Yes) return;
+
+        int deleted = 0;
+        var errors  = new List<string>();
+
+        foreach (var record in selected)
+        {
+            try
+            {
+                SendToRecycleBin(record.FullPath);
+                if (SelectedFile == record)
+                {
+                    SelectedFile = null;
+                }
+                _suggestionCache.TryRemove(record.Id, out _);
+                record.PropertyChanged -= Record_PropertyChanged;
+                Application.Current.Dispatcher.Invoke(() => _allFiles.Remove(record));
+                deleted++;
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"{record.FileName}: {ex.Message}");
+            }
+        }
+
+        StatusText = errors.Count == 0
+            ? $"Moved {deleted} file(s) to the Recycle Bin."
+            : $"Deleted {deleted} file(s); {errors.Count} error(s). First: {errors[0]}";
+
+        OnPropertyChanged(nameof(FileCount));
+        RaiseSelectionChanged();
+    }
+
+    // SHFileOperation — sends a file to the Recycle Bin without showing the
+    // system confirmation dialog (we already confirmed via MessageBox above).
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int SHFileOperation(ref ShFileOpStruct lpFileOp);
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private struct ShFileOpStruct
+    {
+        public IntPtr hwnd;
+        public uint   wFunc;
+        public string pFrom;
+        public string pTo;
+        public ushort fFlags;
+        public bool   fAnyOperationsAborted;
+        public IntPtr hNameMappings;
+        public string lpszProgressTitle;
+    }
+
+    private const uint   FO_DELETE        = 0x0003;
+    private const ushort FOF_ALLOWUNDO    = 0x0040;
+    private const ushort FOF_NOCONFIRM    = 0x0010;
+    private const ushort FOF_SILENT       = 0x0004;
+
+    private static void SendToRecycleBin(string path)
+    {
+        // pFrom must be double-null-terminated
+        var op = new ShFileOpStruct
+        {
+            hwnd   = IntPtr.Zero,
+            wFunc  = FO_DELETE,
+            pFrom  = path + '\0',
+            fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRM | FOF_SILENT,
+        };
+        int result = SHFileOperation(ref op);
+        if (result != 0)
+            throw new IOException($"SHFileOperation failed (0x{result:X8})");
+    }
+
+    // ── Pattern expander (public so RenameDialog can call it for preview) ─────
+
+    private static readonly Regex IndexPadded = new(@"\{index:(\d+)\}", RegexOptions.Compiled);
+
+    public static string ExpandPattern(string pattern, FileRecord record, int index)
+    {
+        var name = Path.GetFileNameWithoutExtension(record.FileName);
+        var ext  = record.Extension.TrimStart('.');
+        var date = (record.LastModified ?? DateTime.UtcNow).ToString("yyyyMMdd");
+
+        var result = pattern
+            .Replace("{name}",  name)
+            .Replace("{ext}",   ext)
+            .Replace("{index}", index.ToString())
+            .Replace("{date}",  date);
+
+        result = IndexPadded.Replace(result, m =>
+        {
+            var width = int.Parse(m.Groups[1].Value);
+            return index.ToString().PadLeft(width, '0');
+        });
+
+        // Ensure the extension is present
+        if (!result.EndsWith(record.Extension, StringComparison.OrdinalIgnoreCase))
+            result += record.Extension;
+
+        return result;
+    }
+
+    // ── Find duplicates ───────────────────────────────────────────────────────
+
+    private async void FindDuplicatesAsync()
+    {
+        _isDetectingDuplicates = true;
+        CommandManager.InvalidateRequerySuggested();
+        StatusText = "Scanning for duplicates…";
+
+        var snapshot = _allFiles.ToList();
+        List<List<FileRecord>> rawGroups;
+
+        try
+        {
+            rawGroups = await DuplicateDetector.FindAsync(
+                snapshot,
+                msg => Application.Current.Dispatcher.Invoke(() => StatusText = msg),
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Duplicate scan error: {ex.Message}";
+            return;
+        }
+        finally
+        {
+            _isDetectingDuplicates = false;
+            CommandManager.InvalidateRequerySuggested();
+        }
+
+        if (rawGroups.Count == 0)
+        {
+            StatusText = "No duplicates found.";
+            return;
+        }
+
+        StatusText = $"Found {rawGroups.Count} duplicate group(s).";
+
+        var dialog = new Views.DuplicatesDialog(rawGroups) { Owner = Application.Current.MainWindow };
+        dialog.ShowDialog();
+
+        if (dialog.DeletedRecordIds.Count == 0) return;
+
+        foreach (var id in dialog.DeletedRecordIds)
+        {
+            var record = _allFiles.FirstOrDefault(f => f.Id == id);
+            if (record is null) continue;
+            record.PropertyChanged -= Record_PropertyChanged;
+            _allFiles.Remove(record);
+            _suggestionCache.TryRemove(id, out _);
+        }
+
+        if (SelectedFile is not null && dialog.DeletedRecordIds.Contains(SelectedFile.Id))
+            SelectedFile = null;
+
+        OnPropertyChanged(nameof(FileCount));
+        RaiseSelectionChanged();
+        StatusText = $"Removed {dialog.DeletedRecordIds.Count} duplicate(s). {_allFiles.Count:N0} files remaining.";
+    }
+
+    // ── Apply suggestion ──────────────────────────────────────────────────────
+
+    private void ApplySuggestion(SuggestionResult? suggestion)
+    {
+        if (suggestion is null || SelectedFile is null) return;
+        var record = SelectedFile;
+
+        var newName  = suggestion.SuggestedName is not null
+            ? suggestion.SuggestedName + record.Extension
+            : null;
+        var destDir  = suggestion.SuggestedFolder ?? Path.GetDirectoryName(record.FullPath)!;
+        var fileName = newName ?? record.FileName;
+        var newPath  = Path.Combine(destDir, fileName);
+
+        if (File.Exists(newPath) && !newPath.Equals(record.FullPath, StringComparison.OrdinalIgnoreCase))
+            newPath = MakeUniquePath(newPath);
+
+        try
+        {
+            Directory.CreateDirectory(destDir);
+            File.Move(record.FullPath, newPath);
+
+            _suggestionService.NotifyFileMoved(
+                record, destDir, newName, _suggestionCache.GetValueOrDefault(record.Id, []));
+
+            var info            = new FileInfo(newPath);
+            record.FullPath     = newPath;
+            record.FileName     = Path.GetFileName(newPath);
+            record.LastModified = info.LastWriteTimeUtc;
+            CurrentSuggestions  = [];
+            StatusText = $"Applied suggestion → {newPath}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Error applying suggestion: {ex.Message}";
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private static string MakeUniquePath(string path)
+    {
+        var dir  = Path.GetDirectoryName(path)!;
+        var name = Path.GetFileNameWithoutExtension(path);
+        var ext  = Path.GetExtension(path);
+        int n    = 1;
+        string candidate;
+        do { candidate = Path.Combine(dir, $"{name} ({n++}){ext}"); }
+        while (File.Exists(candidate));
+        return candidate;
     }
 
     // ── Filtering ─────────────────────────────────────────────────────────────
@@ -234,7 +705,6 @@ public class MainViewModel : INotifyPropertyChanged
     {
         if (string.IsNullOrEmpty(column)) return;
 
-        // Toggle direction if same column clicked
         if (SortColumn == column)
             SortDirection = SortDirection == ListSortDirection.Ascending
                 ? ListSortDirection.Descending
@@ -255,39 +725,46 @@ public class MainViewModel : INotifyPropertyChanged
 
     private void LoadPreview(FileRecord? record)
     {
-        PreviewImage = null;
-        ShowPreview  = false;
+        PreviewImage        = null;
+        ShowImagePreview    = false;
+        ShowDocumentPreview = false;
+        PreviewFilePath     = null;
 
-        if (record is null || record.Category != FileCategory.Image) return;
-        if (!File.Exists(record.FullPath)) return;
-
-        Task.Run(() =>
+        if (record is null || !File.Exists(record.FullPath))
         {
-            try
-            {
-                var bmp = new BitmapImage();
-                bmp.BeginInit();
-                bmp.UriSource          = new Uri(record.FullPath);
-                bmp.DecodePixelWidth   = 420;   // thumbnail — don't load full res
-                bmp.CacheOption        = BitmapCacheOption.OnLoad;
-                bmp.CreateOptions      = BitmapCreateOptions.IgnoreImageCache;
-                bmp.EndInit();
-                bmp.Freeze();   // make cross-thread safe
+            IsPreviewMaximized = false;
+            return;
+        }
 
-                Application.Current.Dispatcher.Invoke(() =>
-                {
-                    PreviewImage = bmp;
-                    ShowPreview  = true;
-                });
-            }
-            catch
+        if (record.Category == FileCategory.Image)
+        {
+            Task.Run(() =>
             {
-                Application.Current.Dispatcher.Invoke(() =>
+                try
                 {
-                    ShowPreview = false;
-                });
-            }
-        });
+                    var bmp = new BitmapImage();
+                    bmp.BeginInit();
+                    bmp.UriSource        = new Uri(record.FullPath);
+                    bmp.DecodePixelWidth = 420;
+                    bmp.CacheOption      = BitmapCacheOption.OnLoad;
+                    bmp.CreateOptions    = BitmapCreateOptions.IgnoreImageCache;
+                    bmp.EndInit();
+                    bmp.Freeze();
+
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        PreviewImage     = bmp;
+                        ShowImagePreview = true;
+                    });
+                }
+                catch { }
+            });
+        }
+        else if (record.Category == FileCategory.Document)
+        {
+            PreviewFilePath     = record.FullPath;
+            ShowDocumentPreview = true;
+        }
     }
 
     // ── Category filter setup ────────────────────────────────────────────────

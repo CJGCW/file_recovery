@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="clr-namespace:FileRecoveryParser.ViewModels"
         xmlns:cv="clr-namespace:FileRecoveryParser.Converters"
+        xmlns:svc="clr-namespace:FileRecoveryParser.Services"
         Title="File Recovery Parser"
         Width="1280" Height="820"
         MinWidth="900" MinHeight="600"
@@ -16,19 +17,27 @@
     <cv:InverseBoolToVisibilityConverter x:Key="InvBoolToVis"/>
     <cv:SortIndicatorConverter    x:Key="SortIndicator"/>
     <cv:DateConverter             x:Key="DateConverter"/>
+    <cv:DurationConverter         x:Key="DurationConverter"/>
 
     <!-- DataGrid row style with hover/select -->
     <Style TargetType="DataGridRow">
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
-      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="BorderThickness" Value="0,0,0,0"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Style.Triggers>
+        <!-- Checkbox-selected (bulk selection) — subtle tint -->
+        <DataTrigger Binding="{Binding IsSelected}" Value="True">
+          <Setter Property="Background" Value="#282848"/>
+        </DataTrigger>
         <Trigger Property="IsMouseOver" Value="True">
           <Setter Property="Background" Value="{StaticResource RowHover}"/>
         </Trigger>
+        <!-- Preview-selected row — always bright regardless of DataGrid focus -->
         <Trigger Property="IsSelected" Value="True">
           <Setter Property="Background" Value="{StaticResource SelectedRow}"/>
+          <Setter Property="BorderThickness" Value="2,0,0,0"/>
+          <Setter Property="BorderBrush"     Value="{StaticResource Accent}"/>
         </Trigger>
       </Style.Triggers>
     </Style>
@@ -115,7 +124,7 @@
 
             <!-- Folder picker -->
             <TextBlock Text="SOURCE FOLDER" FontSize="10" FontWeight="SemiBold"
-                       Foreground="{StaticResource TextSecondary}" LetterSpacing="1" Margin="0,0,0,8"/>
+                       Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
             <Grid>
               <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
@@ -208,7 +217,9 @@
 
             <Separator Margin="0,16,0,14" Background="{StaticResource Border}"/>
             <Button Content="Clear Results" Style="{StaticResource SecondaryButton}"
-                    Height="30" Command="{Binding ClearCommand}"/>
+                    Height="30" Command="{Binding ClearCommand}" Margin="0,0,0,6"/>
+            <Button Content="Find Duplicates" Style="{StaticResource SecondaryButton}"
+                    Height="30" Command="{Binding FindDuplicatesCommand}"/>
 
           </StackPanel>
         </ScrollViewer>
@@ -221,6 +232,7 @@
       <Grid Grid.Column="2">
         <Grid.RowDefinitions>
           <RowDefinition Height="36"/>  <!-- results count bar -->
+          <RowDefinition Height="36"/>  <!-- action bar -->
           <RowDefinition Height="*"/>   <!-- grid -->
         </Grid.RowDefinitions>
 
@@ -235,8 +247,43 @@
           </StackPanel>
         </Border>
 
+        <!-- Action bar -->
+        <Border Grid.Row="1" Background="{StaticResource BgPanel}"
+                BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1" Padding="12,0">
+          <Grid>
+            <!-- Selected count (left) -->
+            <TextBlock VerticalAlignment="Center" FontSize="12"
+                       Foreground="{StaticResource TextSecondary}">
+              <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                  <Setter Property="Visibility" Value="Visible"/>
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding SelectedCount}" Value="0">
+                      <Setter Property="Visibility" Value="Collapsed"/>
+                    </DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </TextBlock.Style>
+              <Run Text="{Binding SelectedCount, Mode=OneWay}"/>
+              <Run Text=" selected"/>
+            </TextBlock>
+            <!-- Action buttons (right) -->
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+              <Button Content="Rename" Height="26" Padding="10,0"
+                      Style="{StaticResource SecondaryButton}"
+                      Command="{Binding RenameCommand}" Margin="0,0,6,0"/>
+              <Button Content="Move to…" Height="26" Padding="10,0"
+                      Style="{StaticResource SecondaryButton}"
+                      Command="{Binding MoveCommand}" Margin="0,0,6,0"/>
+              <Button Content="Delete" Height="26" Padding="10,0"
+                      Style="{StaticResource DangerButton}"
+                      Command="{Binding DeleteCommand}"/>
+            </StackPanel>
+          </Grid>
+        </Border>
+
         <!-- DataGrid -->
-        <DataGrid Grid.Row="1"
+        <DataGrid Grid.Row="2"
                   x:Name="FileGrid"
                   ItemsSource="{Binding FileView}"
                   SelectedItem="{Binding SelectedFile}"
@@ -260,7 +307,44 @@
                   ScrollViewer.VerticalScrollBarVisibility="Auto"
                   Margin="0">
 
+          <DataGrid.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="Rename…"  Command="{Binding RenameCommand}"/>
+              <MenuItem Header="Move to…" Command="{Binding MoveCommand}"/>
+              <Separator/>
+              <MenuItem Header="Delete" Command="{Binding DeleteCommand}"
+                        Foreground="#E06C6C"/>
+            </ContextMenu>
+          </DataGrid.ContextMenu>
+
+          <!-- Keep selection highlight when DataGrid loses keyboard focus -->
+          <DataGrid.Resources>
+            <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}"
+                             Color="#3A3560"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}"
+                             Color="#E8E8F0"/>
+          </DataGrid.Resources>
+
           <DataGrid.Columns>
+
+            <!-- Checkbox -->
+            <DataGridTemplateColumn Width="36" CanUserResize="False">
+              <DataGridTemplateColumn.HeaderTemplate>
+                <DataTemplate>
+                  <CheckBox IsThreeState="True" HorizontalAlignment="Center"
+                            IsChecked="{Binding DataContext.AllSelected, Mode=TwoWay,
+                                        RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                            Command="{Binding DataContext.SelectAllCommand,
+                                     RelativeSource={RelativeSource AncestorType=DataGrid}}"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.HeaderTemplate>
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <CheckBox IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"
+                            HorizontalAlignment="Center"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
 
             <!-- File name -->
             <DataGridTemplateColumn MinWidth="180" Width="2*">
@@ -390,6 +474,24 @@
               </DataGridTemplateColumn.CellTemplate>
             </DataGridTemplateColumn>
 
+            <!-- Length (video/audio only) -->
+            <DataGridTemplateColumn Width="80" MinWidth="70" Header="Length">
+              <DataGridTemplateColumn.HeaderTemplate>
+                <DataTemplate>
+                  <TextBlock Text="Length" FontSize="11" FontWeight="SemiBold"
+                             Foreground="{StaticResource TextSecondary}" Padding="8,6"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.HeaderTemplate>
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Text="{Binding Duration, Converter={StaticResource DurationConverter}}"
+                             Padding="6,4" HorizontalAlignment="Right"
+                             Foreground="{StaticResource TextSecondary}" FontSize="12"
+                             FontFamily="Consolas"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+
             <!-- Date modified -->
             <DataGridTemplateColumn Width="150" MinWidth="120">
               <DataGridTemplateColumn.HeaderTemplate>
@@ -457,15 +559,18 @@
         </DataGrid>
 
         <!-- Empty state -->
-        <StackPanel Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center"
-                    Visibility="{Binding IsNotScanning, Converter={StaticResource BoolToVis}}">
+        <StackPanel Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center">
           <StackPanel.Style>
             <Style TargetType="StackPanel">
               <Setter Property="Visibility" Value="Collapsed"/>
               <Style.Triggers>
-                <DataTrigger Binding="{Binding FileCount}" Value="0">
+                <MultiDataTrigger>
+                  <MultiDataTrigger.Conditions>
+                    <Condition Binding="{Binding FileCount}" Value="0"/>
+                    <Condition Binding="{Binding IsNotScanning}" Value="True"/>
+                  </MultiDataTrigger.Conditions>
                   <Setter Property="Visibility" Value="Visible"/>
-                </DataTrigger>
+                </MultiDataTrigger>
               </Style.Triggers>
             </Style>
           </StackPanel.Style>
@@ -482,41 +587,112 @@
                     Background="{StaticResource Border}" Cursor="SizeWE"/>
 
       <!-- ─── PREVIEW PANEL ─────────────────────────────────── -->
-      <Border Grid.Column="4" Background="{StaticResource BgPanel}"
+      <Border Background="{StaticResource BgPanel}"
               BorderBrush="{StaticResource Border}" BorderThickness="1,0,0,0">
+        <Border.Style>
+          <Style TargetType="Border">
+            <Setter Property="Grid.Column"     Value="4"/>
+            <Setter Property="Grid.ColumnSpan" Value="1"/>
+            <Setter Property="Panel.ZIndex"    Value="0"/>
+            <Style.Triggers>
+              <DataTrigger Binding="{Binding IsPreviewMaximized}" Value="True">
+                <Setter Property="Grid.Column"     Value="0"/>
+                <Setter Property="Grid.ColumnSpan" Value="5"/>
+                <Setter Property="Panel.ZIndex"    Value="100"/>
+              </DataTrigger>
+            </Style.Triggers>
+          </Style>
+        </Border.Style>
+
         <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+
+          <!-- Preview panel header (maximize button) -->
+          <Border Grid.Row="0" Background="{StaticResource BgPanel}"
+                  BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+                  Padding="10,6"
+                  Visibility="{Binding ShowAnyPreview, Converter={StaticResource BoolToVis}}">
+            <Grid>
+              <TextBlock Text="PREVIEW" FontSize="10" FontWeight="SemiBold"
+                         Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+              <Button HorizontalAlignment="Right" VerticalAlignment="Center"
+                      Height="22" Padding="8,0" FontSize="11"
+                      Command="{Binding TogglePreviewMaximizeCommand}">
+                <Button.Style>
+                  <Style TargetType="Button" BasedOn="{StaticResource SecondaryButton}">
+                    <Setter Property="Content" Value="⤢  Expand"/>
+                    <Style.Triggers>
+                      <DataTrigger Binding="{Binding IsPreviewMaximized}" Value="True">
+                        <Setter Property="Content" Value="⤡  Restore"/>
+                      </DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </Button.Style>
+              </Button>
+            </Grid>
+          </Border>
+
+          <!-- Preview content (row 1) -->
+          <Grid Grid.Row="1">
 
           <!-- No selection placeholder -->
           <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
-                      Visibility="{Binding ShowPreview, Converter={StaticResource InvBoolToVis}}">
-            <TextBlock Text="🖼" FontSize="36" HorizontalAlignment="Center" Margin="0,0,0,10"/>
-            <TextBlock Text="Select an image file" FontSize="13"
+                      Visibility="{Binding ShowAnyPreview, Converter={StaticResource InvBoolToVis}}">
+            <TextBlock Text="📄" FontSize="36" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+            <TextBlock Text="Select a file" FontSize="13"
                        Foreground="{StaticResource TextSecondary}" HorizontalAlignment="Center"/>
             <TextBlock Text="to preview it here." FontSize="13"
                        Foreground="{StaticResource TextSecondary}" HorizontalAlignment="Center"/>
           </StackPanel>
 
           <!-- Preview content -->
-          <Grid Visibility="{Binding ShowPreview, Converter={StaticResource BoolToVis}}">
+          <Grid Visibility="{Binding ShowAnyPreview, Converter={StaticResource BoolToVis}}">
             <Grid.RowDefinitions>
               <RowDefinition Height="*"/>
               <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
-            <!-- Image -->
+            <!-- Image or document preview -->
             <Border Grid.Row="0" Margin="12,12,12,8" CornerRadius="8"
                     Background="{StaticResource BgMid}">
-              <Image Source="{Binding PreviewImage}"
-                     Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"
-                     Margin="8"/>
+              <Grid>
+                <Image Source="{Binding PreviewImage}"
+                       Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"
+                       Margin="8"
+                       Visibility="{Binding ShowImagePreview, Converter={StaticResource BoolToVis}}"/>
+                <svc:PreviewHandlerHost FilePath="{Binding PreviewFilePath}"
+                       Visibility="{Binding ShowDocumentPreview, Converter={StaticResource BoolToVis}}"/>
+              </Grid>
             </Border>
 
-            <!-- File metadata under the image -->
+            <!-- File metadata -->
             <Border Grid.Row="1" Margin="12,0,12,12" Padding="12"
                     Background="{StaticResource BgMid}" CornerRadius="8">
               <StackPanel>
                 <TextBlock Text="{Binding SelectedFile.FileName}"
                            FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                <!-- Document title (only shown when present) -->
+                <Grid Margin="0,2">
+                  <Grid.Style>
+                    <Style TargetType="Grid">
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding SelectedFile.DocumentTitle}" Value="{x:Null}">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Grid.Style>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Title" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <TextBlock Grid.Column="1" FontSize="12"
+                             Text="{Binding SelectedFile.DocumentTitle}" TextWrapping="Wrap"/>
+                </Grid>
                 <Grid Margin="0,2">
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="70"/>
@@ -534,6 +710,26 @@
                   <TextBlock Text="Modified" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
                   <TextBlock Grid.Column="1" FontSize="12"
                              Text="{Binding SelectedFile.LastModified, Converter={StaticResource DateConverter}}"/>
+                </Grid>
+                <!-- Duration (video/audio only) -->
+                <Grid Margin="0,2">
+                  <Grid.Style>
+                    <Style TargetType="Grid">
+                      <Setter Property="Visibility" Value="Visible"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding SelectedFile.Duration}" Value="{x:Null}">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Grid.Style>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Length" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <TextBlock Grid.Column="1" FontSize="12"
+                             Text="{Binding SelectedFile.Duration, Converter={StaticResource DurationConverter}}"/>
                 </Grid>
                 <Grid Margin="0,2">
                   <Grid.ColumnDefinitions>
@@ -555,12 +751,99 @@
                              Text="{Binding SelectedFile.FullPath}"
                              TextWrapping="Wrap" Foreground="{StaticResource TextSecondary}"/>
                 </Grid>
+
+                <!-- Suggestions -->
+                <StackPanel Margin="0,10,0,0">
+                  <StackPanel.Style>
+                    <Style TargetType="StackPanel">
+                      <Setter Property="Visibility" Value="Visible"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding CurrentSuggestions.Count}" Value="0">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </StackPanel.Style>
+                  <TextBlock Text="SUGGESTIONS" FontSize="10" FontWeight="SemiBold"
+                             Foreground="{StaticResource TextSecondary}" Margin="0,0,0,4"/>
+                  <ItemsControl ItemsSource="{Binding CurrentSuggestions}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Border Margin="0,0,0,4" Padding="8,6" CornerRadius="6"
+                                Background="{StaticResource BgDark}">
+                          <Grid>
+                            <Grid.RowDefinitions>
+                              <RowDefinition Height="Auto"/>
+                              <RowDefinition Height="Auto"/>
+                              <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <!-- Source + confidence -->
+                            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+                              <Border Padding="4,1" CornerRadius="3"
+                                      Background="{StaticResource Accent}">
+                                <TextBlock Text="{Binding Source}" FontSize="9" FontWeight="SemiBold"
+                                           Foreground="White"/>
+                              </Border>
+                              <TextBlock Margin="6,0,0,0" FontSize="11"
+                                         Foreground="{StaticResource TextSecondary}">
+                                <Run Text="{Binding Confidence, StringFormat={}{0:P0}}"/>
+                                <Run Text=" match"/>
+                              </TextBlock>
+                            </StackPanel>
+                            <!-- Suggested name -->
+                            <TextBlock Grid.Row="1" FontSize="12" FontWeight="SemiBold"
+                                       Text="{Binding SuggestedName}" TextWrapping="Wrap"
+                                       Margin="0,2,32,0">
+                              <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                  <Setter Property="Visibility" Value="Visible"/>
+                                  <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SuggestedName}" Value="{x:Null}">
+                                      <Setter Property="Visibility" Value="Collapsed"/>
+                                    </DataTrigger>
+                                  </Style.Triggers>
+                                </Style>
+                              </TextBlock.Style>
+                            </TextBlock>
+                            <!-- Suggested folder -->
+                            <TextBlock Grid.Row="2" FontSize="10" FontFamily="Consolas"
+                                       Text="{Binding SuggestedFolder}" TextWrapping="Wrap"
+                                       Foreground="{StaticResource TextSecondary}"
+                                       Margin="0,2,32,0">
+                              <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                  <Setter Property="Visibility" Value="Visible"/>
+                                  <Style.Triggers>
+                                    <DataTrigger Binding="{Binding SuggestedFolder}" Value="{x:Null}">
+                                      <Setter Property="Visibility" Value="Collapsed"/>
+                                    </DataTrigger>
+                                  </Style.Triggers>
+                                </Style>
+                              </TextBlock.Style>
+                            </TextBlock>
+                            <!-- Apply -->
+                            <Button Grid.Row="0" Grid.RowSpan="3"
+                                    HorizontalAlignment="Right" VerticalAlignment="Center"
+                                    Content="Apply" Height="22" Padding="8,0"
+                                    Style="{StaticResource SecondaryButton}"
+                                    Command="{Binding DataContext.ApplySuggestionCommand,
+                                              RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}"/>
+                          </Grid>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </StackPanel>
+
               </StackPanel>
             </Border>
           </Grid>
 
-        </Grid>
-      </Border>
+          </Grid><!-- /preview content row -->
+
+        </Grid><!-- /layout grid -->
+      </Border><!-- /preview panel -->
 
     </Grid>
 

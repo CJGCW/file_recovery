@@ -10,4 +10,8 @@
     <RootNamespace>FileRecoveryParser</RootNamespace>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.18.0" />
+  </ItemGroup>
+
 </Project>

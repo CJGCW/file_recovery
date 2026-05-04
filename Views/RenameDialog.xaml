@@ -1,0 +1,97 @@
+<Window x:Class="FileRecoveryParser.Views.RenameDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Rename"
+        Width="480" Height="360"
+        MinWidth="400" MinHeight="280"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResize"
+        Background="#1A1A2E"
+        Foreground="#E0E0E0"
+        FontFamily="Segoe UI">
+
+  <Grid Margin="20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>  <!-- name label + input -->
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>  <!-- token chips -->
+      <RowDefinition Height="*"/>     <!-- preview -->
+      <RowDefinition Height="Auto"/>  <!-- destination folder -->
+      <RowDefinition Height="Auto"/>  <!-- buttons -->
+    </Grid.RowDefinitions>
+
+    <!-- Name label -->
+    <TextBlock x:Name="LabelText" Grid.Row="0" FontSize="13"
+               Foreground="#9090B0" Margin="0,0,0,8"/>
+
+    <!-- Name input -->
+    <TextBox x:Name="InputBox" Grid.Row="1"
+             Background="#252540" Foreground="#E0E0E0"
+             BorderBrush="#3A3A5C" BorderThickness="1"
+             Padding="8,6" FontSize="13" CaretBrush="#E0E0E0"
+             TextChanged="InputBox_TextChanged"/>
+
+    <!-- Token chips (bulk only) -->
+    <StackPanel x:Name="TokenPanel" Grid.Row="2" Margin="0,10,0,0" Visibility="Collapsed">
+      <TextBlock Text="Insert token:" FontSize="11" Foreground="#9090B0" Margin="0,0,0,6"/>
+      <WrapPanel x:Name="TokenChips"/>
+    </StackPanel>
+
+    <!-- Preview list (bulk only) -->
+    <Grid x:Name="PreviewPanel" Grid.Row="3" Margin="0,12,0,0" Visibility="Collapsed">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+      </Grid.RowDefinitions>
+      <TextBlock Grid.Row="0" Text="Preview (first 5):" FontSize="11"
+                 Foreground="#9090B0" Margin="0,0,0,6"/>
+      <ListView x:Name="PreviewList" Grid.Row="1"
+                Background="#252540" BorderBrush="#3A3A5C" BorderThickness="1"
+                Foreground="#E0E0E0" FontFamily="Consolas" FontSize="12"
+                ScrollViewer.HorizontalScrollBarVisibility="Auto">
+        <ListView.ItemContainerStyle>
+          <Style TargetType="ListViewItem">
+            <Setter Property="Padding"    Value="8,3"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+          </Style>
+        </ListView.ItemContainerStyle>
+      </ListView>
+    </Grid>
+
+    <!-- Destination folder -->
+    <StackPanel Grid.Row="4" Margin="0,14,0,0">
+      <TextBlock Text="Move to folder (optional):" FontSize="11"
+                 Foreground="#9090B0" Margin="0,0,0,6"/>
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="8"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <TextBox x:Name="DestBox" Grid.Column="0" IsReadOnly="True"
+                 Background="#252540" Foreground="#9090B0"
+                 BorderBrush="#3A3A5C" BorderThickness="1"
+                 Padding="8,6" FontSize="12" FontFamily="Consolas"
+                 Text="(same folder — no move)"/>
+        <Button Grid.Column="2" Content="Browse…" Padding="10,6" BorderThickness="0"
+                Background="#252540" Foreground="#E0E0E0" Cursor="Hand" Margin="0,0,6,0"
+                Click="BrowseDest_Click"/>
+        <Button Grid.Column="3" Content="✕" Width="30" Padding="0" BorderThickness="0"
+                Background="#252540" Foreground="#9090B0" Cursor="Hand"
+                ToolTip="Clear destination" Click="ClearDest_Click"/>
+      </Grid>
+    </StackPanel>
+
+    <!-- Buttons -->
+    <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button x:Name="CancelBtn" Content="Cancel" Padding="16,6" BorderThickness="0"
+              Background="#252540" Foreground="#9090B0" Cursor="Hand"
+              Click="Cancel_Click" IsCancel="True"/>
+      <Button x:Name="OkBtn" Content="Rename" Padding="16,6" BorderThickness="0"
+              Background="#7C6FF7" Foreground="White" Margin="10,0,0,0" Cursor="Hand"
+              Click="Ok_Click" IsDefault="True"/>
+    </StackPanel>
+  </Grid>
+</Window>
