@@ -702,7 +702,7 @@
                 <Image Source="{Binding PreviewImage}"
                        Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"
                        Margin="8"
-                       Visibility="{Binding ShowImagePreview, Converter={StaticResource BoolToVis}}"/>
+                       Visibility="{Binding ShowMediaPreview, Converter={StaticResource BoolToVis}}"/>
                 <svc:PreviewHandlerHost FilePath="{Binding PreviewFilePath}"
                        Visibility="{Binding ShowDocumentPreview, Converter={StaticResource BoolToVis}}"/>
               </Grid>
@@ -733,6 +733,87 @@
                   <TextBlock Grid.Column="1" FontSize="12"
                              Text="{Binding SelectedFile.DocumentTitle}" TextWrapping="Wrap"/>
                 </Grid>
+                <!-- Video title (embedded or filename-parsed) -->
+                <Grid Margin="0,2">
+                  <Grid.Style>
+                    <Style TargetType="Grid">
+                      <Setter Property="Visibility" Value="Visible"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding SelectedFile.VideoInfo.BestTitle}" Value="{x:Null}">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Grid.Style>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Title" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <TextBlock Grid.Column="1" FontSize="12"
+                             Text="{Binding SelectedFile.VideoInfo.BestTitle}" TextWrapping="Wrap"/>
+                </Grid>
+                <!-- Episode label S01E02 -->
+                <Grid Margin="0,2">
+                  <Grid.Style>
+                    <Style TargetType="Grid">
+                      <Setter Property="Visibility" Value="Visible"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding SelectedFile.VideoInfo.EpisodeLabel}" Value="{x:Null}">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Grid.Style>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Episode" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <TextBlock Grid.Column="1" FontSize="12" FontFamily="Consolas"
+                             Foreground="{StaticResource Accent}"
+                             Text="{Binding SelectedFile.VideoInfo.EpisodeLabel}"/>
+                </Grid>
+                <!-- Resolution -->
+                <Grid Margin="0,2">
+                  <Grid.Style>
+                    <Style TargetType="Grid">
+                      <Setter Property="Visibility" Value="Visible"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding SelectedFile.VideoInfo.Resolution}" Value="{x:Null}">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Grid.Style>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Resolution" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <TextBlock Grid.Column="1" FontSize="12" FontFamily="Consolas"
+                             Text="{Binding SelectedFile.VideoInfo.Resolution}"/>
+                </Grid>
+                <!-- Year (embedded metadata) -->
+                <Grid Margin="0,2">
+                  <Grid.Style>
+                    <Style TargetType="Grid">
+                      <Setter Property="Visibility" Value="Visible"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding SelectedFile.VideoInfo.Year}" Value="{x:Null}">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Grid.Style>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="70"/>
+                    <ColumnDefinition Width="*"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="Year" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <TextBlock Grid.Column="1" FontSize="12" Text="{Binding SelectedFile.VideoInfo.Year}"/>
+                </Grid>
+
                 <Grid Margin="0,2">
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="70"/>

@@ -80,6 +80,12 @@ public class FileScanner
             var detected = _detector.Detect(filePath);
             if (detected is null) return null;
 
+            var cat = detected.Value.Category;
+
+            // Compute once — used for both VideoInfo and Duration
+            VideoInfo? videoInfo = cat == FileCategory.Video
+                ? VideoMetadataReader.Read(filePath) : null;
+
             return new FileRecord
             {
                 Id               = Interlocked.Increment(ref _idCounter),
@@ -87,20 +93,17 @@ public class FileScanner
                 FileName         = info.Name,
                 Extension        = info.Extension.ToLowerInvariant(),
                 DetectedMimeType = detected.Value.MimeType,
-                Category         = detected.Value.Category,
+                Category         = cat,
                 FileSizeBytes    = info.Length,
                 LastModified     = info.LastWriteTimeUtc,
                 ScannedAt        = DateTime.UtcNow,
-                DocumentTitle    = detected.Value.Category == FileCategory.Document
-                                       ? DocumentMetadataReader.ReadTitle(filePath)
-                                       : null,
-                DocumentContent  = detected.Value.Category == FileCategory.Document
-                                       ? DocumentMetadataReader.Read(filePath)
-                                       : null,
-                Duration         = detected.Value.Category is FileCategory.Video or FileCategory.Audio
-                                       ? MediaDurationReader.Read(filePath)
-                                       : null,
-                ImageGroup       = detected.Value.Category == FileCategory.Image
+                DocumentTitle    = cat == FileCategory.Document ? DocumentMetadataReader.ReadTitle(filePath) : null,
+                DocumentContent  = cat == FileCategory.Document ? DocumentMetadataReader.Read(filePath)     : null,
+                VideoInfo        = videoInfo,
+                Duration         = cat == FileCategory.Video ? videoInfo?.Duration
+                                 : cat == FileCategory.Audio ? MediaDurationReader.Read(filePath)
+                                 : null,
+                ImageGroup       = cat == FileCategory.Image
                                        ? ImageClassifier.Classify(filePath, info.Extension)
                                        : ImageSubcategory.None
             };

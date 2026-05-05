@@ -25,12 +25,14 @@ public class MainViewModel : INotifyPropertyChanged
     private bool   _isScanning;
     private string _statusText = "Select a folder to begin.";
     private FileRecord? _selectedFile;
-    private BitmapImage? _previewImage;
+    private BitmapSource? _previewImage;
     private bool    _showImagePreview;
+    private bool    _showVideoPreview;
     private bool    _showDocumentPreview;
     private string? _previewFilePath;
     private bool    _isPreviewMaximized;
     private bool    _isDetectingDuplicates;
+    private CancellationTokenSource? _ocrCts;
     private string _sortColumn = nameof(FileRecord.FileName);
     private ListSortDirection _sortDirection = ListSortDirection.Ascending;
     private CancellationTokenSource? _scanCts;
@@ -148,7 +150,7 @@ public class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    public BitmapImage? PreviewImage
+    public BitmapSource? PreviewImage
     {
         get => _previewImage;
         set { _previewImage = value; OnPropertyChanged(); }
@@ -157,7 +159,13 @@ public class MainViewModel : INotifyPropertyChanged
     public bool ShowImagePreview
     {
         get => _showImagePreview;
-        set { _showImagePreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowAnyPreview)); }
+        set { _showImagePreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowMediaPreview)); OnPropertyChanged(nameof(ShowAnyPreview)); }
+    }
+
+    public bool ShowVideoPreview
+    {
+        get => _showVideoPreview;
+        set { _showVideoPreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowMediaPreview)); OnPropertyChanged(nameof(ShowAnyPreview)); }
     }
 
     public bool ShowDocumentPreview
@@ -166,7 +174,8 @@ public class MainViewModel : INotifyPropertyChanged
         set { _showDocumentPreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowAnyPreview)); }
     }
 
-    public bool ShowAnyPreview => _showImagePreview || _showDocumentPreview;
+    public bool ShowMediaPreview   => _showImagePreview || _showVideoPreview;
+    public bool ShowAnyPreview     => _showImagePreview || _showVideoPreview || _showDocumentPreview;
 
     public bool IsPreviewMaximized
     {
@@ -348,12 +357,15 @@ public class MainViewModel : INotifyPropertyChanged
     private void ClearResults()
     {
         foreach (var r in _allFiles) r.PropertyChanged -= Record_PropertyChanged;
+        _ocrCts?.Cancel();
+        _ocrCts = null;
         _allFiles.Clear();
         _suggestionCache.Clear();
         CurrentSuggestions  = [];
         ImageGroupFilters.Clear();
         PreviewImage        = null;
         ShowImagePreview    = false;
+        ShowVideoPreview    = false;
         ShowDocumentPreview = false;
         PreviewFilePath     = null;
         SelectedFile        = null;
@@ -761,8 +773,13 @@ public class MainViewModel : INotifyPropertyChanged
 
     private void LoadPreview(FileRecord? record)
     {
+        // Cancel any in-flight video OCR from the previously selected file
+        _ocrCts?.Cancel();
+        _ocrCts = null;
+
         PreviewImage        = null;
         ShowImagePreview    = false;
+        ShowVideoPreview    = false;
         ShowDocumentPreview = false;
         PreviewFilePath     = null;
 
@@ -772,7 +789,49 @@ public class MainViewModel : INotifyPropertyChanged
             return;
         }
 
-        if (record.Category == FileCategory.Image)
+        if (record.Category == FileCategory.Video)
+        {
+            var thumbnail = VideoThumbnailService.GetThumbnail(record.FullPath);
+            if (thumbnail is not null)
+            {
+                PreviewImage     = thumbnail;
+                ShowVideoPreview = true;
+            }
+
+            // OCR the thumbnail frame for title-card text
+            if (thumbnail is not null)
+            {
+                _ocrCts = new CancellationTokenSource();
+                var ct  = _ocrCts.Token;
+                _ = Task.Run(async () =>
+                {
+                    var title = await VideoTitleOcrService.ScanForTitleAsync(thumbnail, ct);
+                    if (title is not null && !ct.IsCancellationRequested)
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            if (SelectedFile?.Id != record.Id) return;
+                            var existing = CurrentSuggestions.ToList();
+                            existing.Insert(0, new SuggestionResult(
+                                SuggestedName: title, SuggestedFolder: null,
+                                Confidence: 0.70f, Source: "video-ocr"));
+                            CurrentSuggestions = existing;
+                        });
+                }, ct);
+            }
+
+            // Add filename-parsed title as a suggestion too (fast, no OCR needed)
+            if (record.VideoInfo?.BestTitle is string parsedTitle
+                && string.IsNullOrWhiteSpace(record.VideoInfo.EmbeddedTitle))
+            {
+                var label = record.VideoInfo.EpisodeLabel is not null
+                    ? $"{parsedTitle} {record.VideoInfo.EpisodeLabel}"
+                    : parsedTitle;
+                CurrentSuggestions = [new SuggestionResult(
+                    SuggestedName: label, SuggestedFolder: null,
+                    Confidence: 0.55f, Source: "filename")];
+            }
+        }
+        else if (record.Category == FileCategory.Image)
         {
             Task.Run(() =>
             {
