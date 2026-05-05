@@ -598,6 +598,12 @@
           </DataGrid.Columns>
         </DataGrid>
 
+        <!-- Scan overlay — blocks action bar + grid while scanning is in progress -->
+        <Grid Grid.Row="1" Grid.RowSpan="2" Panel.ZIndex="50" IsHitTestVisible="True"
+              Visibility="{Binding IsScanning, Converter={StaticResource BoolToVis}}">
+          <Rectangle Fill="{StaticResource BgDark}" Opacity="0.55"/>
+        </Grid>
+
         <!-- Empty state -->
         <StackPanel Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center">
           <StackPanel.Style>
