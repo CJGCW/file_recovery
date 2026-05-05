@@ -22,7 +22,8 @@ public class FileRecord : INotifyPropertyChanged
     public TimeSpan?        Duration        { get; set; }
     public VideoInfo?       VideoInfo       { get; set; }
     public ImageSubcategory ImageGroup      { get; set; }
-    public ObservableCollection<TagDefinition> Tags { get; } = [];
+    public ObservableCollection<TagDefinition>  Tags           { get; } = [];
+    public ObservableCollection<SearchPattern>  MatchedPatterns { get; } = [];
 
     public string FullPath
     {

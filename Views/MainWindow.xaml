@@ -147,11 +147,11 @@
             <Button Content="Cancel" Margin="0,6,0,0" Height="32"
                     Style="{StaticResource SecondaryButton}"
                     Command="{Binding CancelCommand}"
-                    Visibility="{Binding IsScanning, Converter={StaticResource BoolToVis}}"/>
+                    Visibility="{Binding IsAnyOperationRunning, Converter={StaticResource BoolToVis}}"/>
 
             <!-- Progress indicator -->
             <StackPanel Orientation="Horizontal" Margin="0,8,0,0"
-                        Visibility="{Binding IsScanning, Converter={StaticResource BoolToVis}}">
+                        Visibility="{Binding IsAnyOperationRunning, Converter={StaticResource BoolToVis}}">
               <TextBlock Text="⟳ " Foreground="{StaticResource Accent}">
                 <TextBlock.RenderTransform>
                   <RotateTransform x:Name="SpinnerRotate" CenterX="7" CenterY="7"/>
@@ -180,6 +180,139 @@
                      ToolTip="Filter by file name or extension"/>
 
             <Separator Margin="0,16,0,14" Background="{StaticResource Border}"/>
+
+            <!-- ▼ TEXT SEARCH (starts collapsed) -->
+            <Expander IsExpanded="False">
+              <Expander.Header>
+                <TextBlock Text="TEXT SEARCH" FontSize="10" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextSecondary}"/>
+              </Expander.Header>
+              <StackPanel Margin="0,8,0,0">
+
+                <!-- Pattern input -->
+                <TextBox Text="{Binding NewSearchText, UpdateSourceTrigger=PropertyChanged}"
+                         ToolTip="Text or regex to find in document/code content">
+                  <TextBox.InputBindings>
+                    <KeyBinding Key="Return" Command="{Binding AddSearchPatternCommand}"/>
+                  </TextBox.InputBindings>
+                </TextBox>
+
+                <!-- Options + Add -->
+                <Grid Margin="0,5,0,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="10"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <CheckBox Grid.Column="0" IsChecked="{Binding NewSearchCaseSensitive}"
+                            ToolTip="Case sensitive">
+                    <TextBlock Text="Aa" FontFamily="Consolas" FontSize="11"/>
+                  </CheckBox>
+                  <CheckBox Grid.Column="2" IsChecked="{Binding NewSearchWholeWord}"
+                            ToolTip="Whole word only">
+                    <TextBlock Text="|W|" FontFamily="Consolas" FontSize="11"/>
+                  </CheckBox>
+                  <Button Grid.Column="4" Content="Add" Height="26" Padding="10,0"
+                          Style="{StaticResource SecondaryButton}"
+                          Command="{Binding AddSearchPatternCommand}"/>
+                </Grid>
+
+                <!-- Pattern list -->
+                <ItemsControl ItemsSource="{Binding SearchPatterns}" Margin="0,6,0,0">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Grid Margin="0,2">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="16"/>
+                          <ColumnDefinition Width="*"/>
+                          <ColumnDefinition Width="Auto"/>
+                          <ColumnDefinition Width="20"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="{Binding Symbol}"
+                                   Foreground="{Binding Color, Converter={StaticResource StringToBrush}}"
+                                   FontSize="11" VerticalAlignment="Center"/>
+                        <TextBlock Grid.Column="1" Text="{Binding Text}"
+                                   FontFamily="Consolas" FontSize="11"
+                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                        <!-- Option badges -->
+                        <StackPanel Grid.Column="2" Orientation="Horizontal"
+                                    Margin="4,0" VerticalAlignment="Center">
+                          <TextBlock Text="Aa" FontSize="9" FontFamily="Consolas"
+                                     Foreground="{StaticResource Accent}" Margin="0,0,3,0">
+                            <TextBlock.Style>
+                              <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                  <DataTrigger Binding="{Binding IsCaseSensitive}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                  </DataTrigger>
+                                </Style.Triggers>
+                              </Style>
+                            </TextBlock.Style>
+                          </TextBlock>
+                          <TextBlock Text="|W|" FontSize="9" FontFamily="Consolas"
+                                     Foreground="{StaticResource Accent}">
+                            <TextBlock.Style>
+                              <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed"/>
+                                <Style.Triggers>
+                                  <DataTrigger Binding="{Binding IsWholeWord}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible"/>
+                                  </DataTrigger>
+                                </Style.Triggers>
+                              </Style>
+                            </TextBlock.Style>
+                          </TextBlock>
+                        </StackPanel>
+                        <!-- Remove -->
+                        <Button Grid.Column="3" Content="×" Padding="0" FontSize="12"
+                                Style="{StaticResource SecondaryButton}" BorderThickness="0"
+                                Command="{Binding DataContext.RemoveSearchPatternCommand,
+                                          RelativeSource={RelativeSource AncestorType=Window}}"
+                                CommandParameter="{Binding}"/>
+                      </Grid>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Search + Clear buttons -->
+                <Grid Margin="0,8,0,0">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="6"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <Button Grid.Column="0" Content="Search" Height="32"
+                          Style="{StaticResource PrimaryButton}"
+                          Command="{Binding RunSearchCommand}"/>
+                  <Button Grid.Column="2" Content="Clear" Height="32" Padding="10,0"
+                          Style="{StaticResource SecondaryButton}"
+                          Command="{Binding ClearSearchCommand}"/>
+                </Grid>
+
+                <!-- Match count -->
+                <TextBlock Margin="0,5,0,0" FontSize="11"
+                           Foreground="{StaticResource TextSecondary}">
+                  <TextBlock.Style>
+                    <Style TargetType="TextBlock">
+                      <Setter Property="Visibility" Value="Visible"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding SearchMatchCount}" Value="0">
+                          <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </TextBlock.Style>
+                  <Run Text="{Binding SearchMatchCount, Mode=OneWay}"/>
+                  <Run Text=" file(s) matched"/>
+                </TextBlock>
+
+              </StackPanel>
+            </Expander>
+
+            <Separator Margin="0,14,0,14" Background="{StaticResource Border}"/>
 
             <!-- ▼ CATEGORIES -->
             <Expander>
@@ -383,6 +516,29 @@
                 <DataTemplate>
                   <CheckBox IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"
                             HorizontalAlignment="Center"/>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+
+            <!-- Search match indicators -->
+            <DataGridTemplateColumn Width="36" CanUserResize="False">
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <ItemsControl ItemsSource="{Binding MatchedPatterns}" Margin="4,0">
+                    <ItemsControl.ItemsPanel>
+                      <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal"/>
+                      </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <TextBlock Text="{Binding Symbol}" FontSize="10" Margin="0,0,2,0"
+                                   VerticalAlignment="Center"
+                                   Foreground="{Binding Color, Converter={StaticResource StringToBrush}}"
+                                   ToolTip="{Binding Text}"/>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
                 </DataTemplate>
               </DataGridTemplateColumn.CellTemplate>
             </DataGridTemplateColumn>

@@ -48,6 +48,13 @@ public class MainViewModel : INotifyPropertyChanged
     private string _newTagText = string.Empty;
     private IList<string> _suggestedTags = [];
 
+    // ── Text search ──────────────────────────────────────────────────────────
+    private string _newSearchText        = string.Empty;
+    private bool   _newSearchCaseSensitive;
+    private bool   _newSearchWholeWord;
+    private bool   _isSearching;
+    private CancellationTokenSource? _searchCts;
+
     // ── Collections ──────────────────────────────────────────────────────────
 
     private readonly ObservableCollection<FileRecord> _allFiles = [];
@@ -67,10 +74,12 @@ public class MainViewModel : INotifyPropertyChanged
         FileView.Filter = ApplyFilter;
         ((ICollectionView)FileView).CollectionChanged += (_, _) => OnPropertyChanged(nameof(FileCount));
 
-        AllTags = new ObservableCollection<TagDefinition>(_tagStore.Definitions);
+        AllTags        = new ObservableCollection<TagDefinition>(_tagStore.Definitions);
+        SearchPatterns = [];
 
         ScanCommand            = new RelayCommand(_ => { if (_ is string s) StartScan(s); else StartScan(FolderPath); }, _ => !IsScanning);
-        CancelCommand          = new RelayCommand(_ => _scanCts?.Cancel(), _ => IsScanning);
+        CancelCommand          = new RelayCommand(_ => { _scanCts?.Cancel(); _searchCts?.Cancel(); },
+                                                  _ => IsScanning || _isSearching);
         SortCommand            = new RelayCommand(col => ApplySort(col as string ?? string.Empty));
         ClearCommand           = new RelayCommand(_ => ClearResults(), _ => _allFiles.Count > 0);
         SelectAllCommand       = new RelayCommand(_ => ToggleSelectAll());
@@ -84,6 +93,12 @@ public class MainViewModel : INotifyPropertyChanged
         AddTagCommand                  = new RelayCommand(p => AddTag(p as string), _ => SelectedFile is not null);
         RemoveTagCommand               = new RelayCommand(p => RemoveTag(p as TagDefinition), _ => SelectedFile is not null);
         CreateAndAddTagCommand         = new RelayCommand(_ => CreateAndAddTag(), _ => SelectedFile is not null && !string.IsNullOrWhiteSpace(NewTagText));
+        AddSearchPatternCommand        = new RelayCommand(_ => AddSearchPattern(), _ => !string.IsNullOrWhiteSpace(NewSearchText));
+        RemoveSearchPatternCommand     = new RelayCommand(p => RemoveSearchPattern(p as SearchPattern));
+        RunSearchCommand               = new RelayCommand(_ => RunSearch(),
+                                             _ => SearchPatterns.Count > 0 && _allFiles.Count > 0 && !_isScanning && !_isSearching);
+        ClearSearchCommand             = new RelayCommand(_ => ClearSearch(),
+                                             _ => SearchPatterns.Count > 0 || _allFiles.Any(f => f.MatchedPatterns.Count > 0));
 
         InitialiseCategoryFilters();
     }
@@ -105,7 +120,7 @@ public class MainViewModel : INotifyPropertyChanged
     public bool IsScanning
     {
         get => _isScanning;
-        set { _isScanning = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsNotScanning)); }
+        set { _isScanning = value; OnPropertyChanged(); OnPropertyChanged(nameof(IsNotScanning)); OnPropertyChanged(nameof(IsAnyOperationRunning)); }
     }
 
     public bool IsNotScanning => !_isScanning;
@@ -229,6 +244,41 @@ public class MainViewModel : INotifyPropertyChanged
 
     public bool ShowMetadata => _selectedFile is not null;
 
+    public ObservableCollection<SearchPattern> SearchPatterns { get; private set; }
+
+    public string NewSearchText
+    {
+        get => _newSearchText;
+        set { _newSearchText = value; OnPropertyChanged(); CommandManager.InvalidateRequerySuggested(); }
+    }
+
+    public bool NewSearchCaseSensitive
+    {
+        get => _newSearchCaseSensitive;
+        set { _newSearchCaseSensitive = value; OnPropertyChanged(); }
+    }
+
+    public bool NewSearchWholeWord
+    {
+        get => _newSearchWholeWord;
+        set { _newSearchWholeWord = value; OnPropertyChanged(); }
+    }
+
+    public bool IsSearching
+    {
+        get => _isSearching;
+        private set
+        {
+            _isSearching = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(IsAnyOperationRunning));
+        }
+    }
+
+    public bool IsAnyOperationRunning => _isScanning || _isSearching;
+
+    public int SearchMatchCount => _allFiles.Count(f => f.MatchedPatterns.Count > 0);
+
     // ── Commands ─────────────────────────────────────────────────────────────
 
     public ICommand ScanCommand            { get; }
@@ -245,6 +295,10 @@ public class MainViewModel : INotifyPropertyChanged
     public ICommand AddTagCommand                { get; }
     public ICommand RemoveTagCommand             { get; }
     public ICommand CreateAndAddTagCommand       { get; }
+    public ICommand AddSearchPatternCommand      { get; }
+    public ICommand RemoveSearchPatternCommand   { get; }
+    public ICommand RunSearchCommand             { get; }
+    public ICommand ClearSearchCommand           { get; }
 
     // ── Scanning ─────────────────────────────────────────────────────────────
 
@@ -734,6 +788,70 @@ public class MainViewModel : INotifyPropertyChanged
         {
             StatusText = $"Error applying suggestion: {ex.Message}";
         }
+    }
+
+    // ── Text search ───────────────────────────────────────────────────────────
+
+    private void AddSearchPattern()
+    {
+        var text = NewSearchText.Trim();
+        if (string.IsNullOrEmpty(text)) return;
+
+        var (symbol, color) = DocumentSearchService.GetPatternStyle(SearchPatterns.Count);
+        SearchPatterns.Add(new SearchPattern
+        {
+            Text            = text,
+            IsCaseSensitive = NewSearchCaseSensitive,
+            IsWholeWord     = NewSearchWholeWord,
+            Symbol          = symbol,
+            Color           = color,
+        });
+        NewSearchText = string.Empty;
+    }
+
+    private void RemoveSearchPattern(SearchPattern? p)
+    {
+        if (p is null) return;
+        SearchPatterns.Remove(p);
+        foreach (var file in _allFiles)
+            file.MatchedPatterns.Remove(p);
+        OnPropertyChanged(nameof(SearchMatchCount));
+    }
+
+    private async void RunSearch()
+    {
+        _isSearching = true;
+        IsSearching  = true;
+        _searchCts   = new CancellationTokenSource();
+        CommandManager.InvalidateRequerySuggested();
+
+        try
+        {
+            await DocumentSearchService.RunSearchAsync(
+                _allFiles.ToList(),
+                SearchPatterns.ToList(),
+                msg => Application.Current.Dispatcher.Invoke(() => StatusText = msg),
+                _searchCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "Search cancelled.";
+        }
+        finally
+        {
+            IsSearching = false;
+            _searchCts  = null;
+            OnPropertyChanged(nameof(SearchMatchCount));
+            CommandManager.InvalidateRequerySuggested();
+        }
+    }
+
+    private void ClearSearch()
+    {
+        SearchPatterns.Clear();
+        foreach (var file in _allFiles)
+            file.MatchedPatterns.Clear();
+        OnPropertyChanged(nameof(SearchMatchCount));
     }
 
     // ── Tagging ───────────────────────────────────────────────────────────────
