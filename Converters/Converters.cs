@@ -101,6 +101,27 @@ public class DateConverter : IValueConverter
         => throw new NotImplementedException();
 }
 
+/// <summary>Converts a hex colour string (e.g. "#7C6FF7") to a SolidColorBrush.</summary>
+public class StringToBrushConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (value is string hex)
+        {
+            try
+            {
+                var color = (Color)ColorConverter.ConvertFromString(hex);
+                return new SolidColorBrush(color);
+            }
+            catch { }
+        }
+        return Brushes.Gray;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}
+
 /// <summary>Formats a nullable TimeSpan as h:mm:ss or m:ss. Returns empty string for null/zero.</summary>
 public class DurationConverter : IValueConverter
 {

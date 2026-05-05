@@ -43,6 +43,11 @@ public class MainViewModel : INotifyPropertyChanged
     private readonly ConcurrentDictionary<long, IList<SuggestionResult>> _suggestionCache = new();
     private Channel<FileRecord>? _recognitionQueue;
 
+    // ── Tagging ──────────────────────────────────────────────────────────────
+    private readonly TagStore _tagStore = new();
+    private string _newTagText = string.Empty;
+    private IList<string> _suggestedTags = [];
+
     // ── Collections ──────────────────────────────────────────────────────────
 
     private readonly ObservableCollection<FileRecord> _allFiles = [];
@@ -62,6 +67,8 @@ public class MainViewModel : INotifyPropertyChanged
         FileView.Filter = ApplyFilter;
         ((ICollectionView)FileView).CollectionChanged += (_, _) => OnPropertyChanged(nameof(FileCount));
 
+        AllTags = new ObservableCollection<TagDefinition>(_tagStore.Definitions);
+
         ScanCommand            = new RelayCommand(_ => { if (_ is string s) StartScan(s); else StartScan(FolderPath); }, _ => !IsScanning);
         CancelCommand          = new RelayCommand(_ => _scanCts?.Cancel(), _ => IsScanning);
         SortCommand            = new RelayCommand(col => ApplySort(col as string ?? string.Empty));
@@ -72,8 +79,11 @@ public class MainViewModel : INotifyPropertyChanged
         DeleteCommand          = new RelayCommand(_ => ExecuteDelete(), _ => SelectedCount > 0);
         ApplySuggestionCommand         = new RelayCommand(s => ApplySuggestion(s as SuggestionResult));
         TogglePreviewMaximizeCommand   = new RelayCommand(_ => IsPreviewMaximized = !IsPreviewMaximized);
-        FindDuplicatesCommand         = new RelayCommand(_ => FindDuplicatesAsync(),
+        FindDuplicatesCommand          = new RelayCommand(_ => FindDuplicatesAsync(),
                                             _ => _allFiles.Count > 0 && !IsScanning && !_isDetectingDuplicates);
+        AddTagCommand                  = new RelayCommand(p => AddTag(p as string), _ => SelectedFile is not null);
+        RemoveTagCommand               = new RelayCommand(p => RemoveTag(p as TagDefinition), _ => SelectedFile is not null);
+        CreateAndAddTagCommand         = new RelayCommand(_ => CreateAndAddTag(), _ => SelectedFile is not null && !string.IsNullOrWhiteSpace(NewTagText));
 
         InitialiseCategoryFilters();
     }
@@ -143,10 +153,12 @@ public class MainViewModel : INotifyPropertyChanged
         {
             _selectedFile = value;
             OnPropertyChanged();
+            OnPropertyChanged(nameof(ShowMetadata));
             LoadPreview(value);
             CurrentSuggestions = value is not null
                 ? _suggestionCache.GetValueOrDefault(value.Id, [])
                 : [];
+            SuggestedTags = value is not null ? ComputeSuggestedTags(value) : [];
         }
     }
 
@@ -201,6 +213,22 @@ public class MainViewModel : INotifyPropertyChanged
         set { _sortDirection = value; OnPropertyChanged(); }
     }
 
+    public ObservableCollection<TagDefinition> AllTags { get; private set; } = [];
+
+    public string NewTagText
+    {
+        get => _newTagText;
+        set { _newTagText = value; OnPropertyChanged(); CommandManager.InvalidateRequerySuggested(); }
+    }
+
+    public IList<string> SuggestedTags
+    {
+        get => _suggestedTags;
+        private set { _suggestedTags = value; OnPropertyChanged(); }
+    }
+
+    public bool ShowMetadata => _selectedFile is not null;
+
     // ── Commands ─────────────────────────────────────────────────────────────
 
     public ICommand ScanCommand            { get; }
@@ -214,6 +242,9 @@ public class MainViewModel : INotifyPropertyChanged
     public ICommand TogglePreviewMaximizeCommand { get; }
     public ICommand DeleteCommand                { get; }
     public ICommand FindDuplicatesCommand        { get; }
+    public ICommand AddTagCommand                { get; }
+    public ICommand RemoveTagCommand             { get; }
+    public ICommand CreateAndAddTagCommand       { get; }
 
     // ── Scanning ─────────────────────────────────────────────────────────────
 
@@ -241,6 +272,9 @@ public class MainViewModel : INotifyPropertyChanged
 
         // Start background recognition worker
         _ = Task.Run(() => RunRecognitionWorkerAsync(queue, ct), CancellationToken.None);
+
+        AllTags.Clear();
+        foreach (var t in _tagStore.Definitions) AllTags.Add(t);
 
         var allowedExtensions = ExtensionFilters
             .Where(f => f.IsChecked)
@@ -275,6 +309,8 @@ public class MainViewModel : INotifyPropertyChanged
                     found++;
                     Application.Current.Dispatcher.Invoke(() =>
                     {
+                        foreach (var tag in _tagStore.GetTagsForPath(record.FullPath))
+                            record.Tags.Add(tag);
                         _allFiles.Add(record);
                         if (found % 500 == 0)
                             StatusText = $"Found {found:N0} files…";
@@ -362,6 +398,7 @@ public class MainViewModel : INotifyPropertyChanged
         _allFiles.Clear();
         _suggestionCache.Clear();
         CurrentSuggestions  = [];
+        SuggestedTags       = [];
         ImageGroupFilters.Clear();
         PreviewImage        = null;
         ShowImagePreview    = false;
@@ -369,6 +406,7 @@ public class MainViewModel : INotifyPropertyChanged
         ShowDocumentPreview = false;
         PreviewFilePath     = null;
         SelectedFile        = null;
+        OnPropertyChanged(nameof(ShowMetadata));
         OnPropertyChanged(nameof(FileCount));
         RaiseSelectionChanged();
     }
@@ -405,10 +443,12 @@ public class MainViewModel : INotifyPropertyChanged
                 if (File.Exists(newPath))
                     newPath = MakeUniquePath(newPath);
 
-                File.Move(record.FullPath, newPath);
+                var oldPath = record.FullPath;
+                File.Move(oldPath, newPath);
 
                 _suggestionService.NotifyFileMoved(
                     record, dest, null, _suggestionCache.GetValueOrDefault(record.Id, []));
+                _tagStore.UpdatePath(oldPath, newPath);
 
                 var info            = new FileInfo(newPath);
                 record.FullPath     = newPath;
@@ -458,10 +498,12 @@ public class MainViewModel : INotifyPropertyChanged
                 if (File.Exists(newPath) && !newPath.Equals(record.FullPath, StringComparison.OrdinalIgnoreCase))
                     newPath = MakeUniquePath(newPath);
 
-                File.Move(record.FullPath, newPath);
+                var oldPath = record.FullPath;
+                File.Move(oldPath, newPath);
 
                 _suggestionService.NotifyFileMoved(
                     record, targetDir, newName, _suggestionCache.GetValueOrDefault(record.Id, []));
+                _tagStore.UpdatePath(oldPath, newPath);
 
                 record.FullPath   = newPath;
                 record.FileName   = Path.GetFileName(newPath);
@@ -692,6 +734,116 @@ public class MainViewModel : INotifyPropertyChanged
         {
             StatusText = $"Error applying suggestion: {ex.Message}";
         }
+    }
+
+    // ── Tagging ───────────────────────────────────────────────────────────────
+
+    private void AddTag(string? name)
+    {
+        if (SelectedFile is null || string.IsNullOrWhiteSpace(name)) return;
+        name = name.Trim();
+        if (SelectedFile.Tags.Any(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) return;
+
+        var tag = _tagStore.GetOrCreate(name);
+        _tagStore.AssignTag(SelectedFile.FullPath, tag.Name);
+        SelectedFile.Tags.Add(tag);
+
+        if (!AllTags.Contains(tag)) AllTags.Add(tag);
+
+        // Remove from suggestions now that it's applied
+        SuggestedTags = SuggestedTags
+            .Where(s => !s.Equals(name, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    private void RemoveTag(TagDefinition? tag)
+    {
+        if (SelectedFile is null || tag is null) return;
+        _tagStore.UnassignTag(SelectedFile.FullPath, tag.Name);
+        SelectedFile.Tags.Remove(tag);
+
+        // Re-add to suggestions if it would naturally be suggested
+        SuggestedTags = ComputeSuggestedTags(SelectedFile);
+    }
+
+    private void CreateAndAddTag()
+    {
+        AddTag(NewTagText.Trim());
+        NewTagText = string.Empty;
+    }
+
+    private IList<string> ComputeSuggestedTags(FileRecord r)
+    {
+        var suggestions = new List<string>();
+
+        switch (r.Category)
+        {
+            case FileCategory.Document:
+            {
+                var text = string.Join(" ",
+                    r.DocumentTitle,
+                    r.DocumentContent?.Title,
+                    r.DocumentContent?.HeaderText,
+                    r.DocumentContent?.Author).ToLowerInvariant();
+
+                if (text.Contains("chem") || text.Contains("lab"))              suggestions.Add("Chemistry");
+                if (text.Contains("homework") || text.Contains("assignment"))    suggestions.Add("Homework");
+                if (text.Contains("invoice") || text.Contains("receipt"))        suggestions.Add("Invoice");
+                if (text.Contains("contract") || text.Contains("agreement"))     suggestions.Add("Contract");
+                if (text.Contains("resume") || text.Contains("curriculum") ||
+                    text.Contains(" cv ") || text.Contains("curriculum vitae"))  suggestions.Add("Resume");
+                if (text.Contains("essay") || text.Contains("thesis"))           suggestions.Add("Essay");
+                if (text.Contains("report"))                                      suggestions.Add("Report");
+                if (text.Contains("physics"))                                     suggestions.Add("Physics");
+                if (text.Contains("math") || text.Contains("calculus") ||
+                    text.Contains("algebra"))                                     suggestions.Add("Math");
+                if (text.Contains("biology") || text.Contains("biolog"))         suggestions.Add("Biology");
+
+                if (!string.IsNullOrWhiteSpace(r.DocumentContent?.Author))
+                    suggestions.Add(TitleCase(r.DocumentContent.Author.Trim()));
+
+                foreach (var kw in r.DocumentContent?.Keywords ?? [])
+                    if (kw.Length > 3) suggestions.Add(TitleCase(kw));
+                break;
+            }
+
+            case FileCategory.Video:
+                if (r.VideoInfo?.EpisodeLabel is not null)  suggestions.Add("TV Show");
+                else if (r.VideoInfo?.Year is not null)     suggestions.Add("Movie");
+
+                if (r.VideoInfo?.BestTitle is string title && !string.IsNullOrWhiteSpace(title))
+                    suggestions.Add(title);
+                break;
+
+            case FileCategory.Image:
+                var label = r.ImageGroup switch
+                {
+                    ImageSubcategory.Icon        => "Icon",
+                    ImageSubcategory.Screenshot  => "Screenshot",
+                    ImageSubcategory.Wallpaper   => "Wallpaper",
+                    ImageSubcategory.GameAsset   => "Game Asset",
+                    ImageSubcategory.PersonPhoto => "People",
+                    _                            => null
+                };
+                if (label is not null) suggestions.Add(label);
+                break;
+
+            case FileCategory.Audio:
+                suggestions.Add("Music");
+                break;
+        }
+
+        return suggestions
+            .Where(s => !r.Tags.Any(t => t.Name.Equals(s, StringComparison.OrdinalIgnoreCase)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(8)
+            .ToList();
+    }
+
+    private static string TitleCase(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return s;
+        return char.ToUpperInvariant(s[0]) + s[1..].ToLowerInvariant();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

@@ -11,13 +11,14 @@
         FontFamily="Segoe UI">
 
   <Window.Resources>
-    <cv:FileSizeConverter         x:Key="FileSizeConverter"/>
-    <cv:CategoryColorConverter    x:Key="CategoryColorConverter"/>
-    <cv:BoolToVisibilityConverter x:Key="BoolToVis"/>
+    <cv:FileSizeConverter              x:Key="FileSizeConverter"/>
+    <cv:CategoryColorConverter         x:Key="CategoryColorConverter"/>
+    <cv:BoolToVisibilityConverter      x:Key="BoolToVis"/>
     <cv:InverseBoolToVisibilityConverter x:Key="InvBoolToVis"/>
-    <cv:SortIndicatorConverter    x:Key="SortIndicator"/>
-    <cv:DateConverter             x:Key="DateConverter"/>
-    <cv:DurationConverter         x:Key="DurationConverter"/>
+    <cv:SortIndicatorConverter         x:Key="SortIndicator"/>
+    <cv:DateConverter                  x:Key="DateConverter"/>
+    <cv:DurationConverter              x:Key="DurationConverter"/>
+    <cv:StringToBrushConverter         x:Key="StringToBrush"/>
 
     <!-- DataGrid row style with hover/select -->
     <Style TargetType="DataGridRow">
@@ -532,33 +533,31 @@
               </DataGridTemplateColumn.CellTemplate>
             </DataGridTemplateColumn>
 
-            <!-- Date modified -->
-            <DataGridTemplateColumn Width="150" MinWidth="120">
+            <!-- Tags -->
+            <DataGridTemplateColumn Width="160" MinWidth="80">
               <DataGridTemplateColumn.HeaderTemplate>
                 <DataTemplate>
-                  <Button Style="{StaticResource SecondaryButton}" BorderThickness="0"
-                          Background="Transparent" Padding="0"
-                          Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
-                          CommandParameter="LastModified">
-                    <StackPanel Orientation="Horizontal">
-                      <TextBlock Text="Modified" FontSize="11" FontWeight="SemiBold"
-                                 Foreground="{StaticResource TextSecondary}"/>
-                      <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
-                        <TextBlock.Text>
-                          <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="LastModified">
-                            <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
-                            <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
-                          </MultiBinding>
-                        </TextBlock.Text>
-                      </TextBlock>
-                    </StackPanel>
-                  </Button>
+                  <TextBlock Text="Tags" FontSize="11" FontWeight="SemiBold"
+                             Foreground="{StaticResource TextSecondary}" Padding="8,6"/>
                 </DataTemplate>
               </DataGridTemplateColumn.HeaderTemplate>
               <DataGridTemplateColumn.CellTemplate>
                 <DataTemplate>
-                  <TextBlock Text="{Binding LastModified, Converter={StaticResource DateConverter}}"
-                             Padding="6,4" Foreground="{StaticResource TextSecondary}" FontSize="12"/>
+                  <ItemsControl ItemsSource="{Binding Tags}" Margin="4,3">
+                    <ItemsControl.ItemsPanel>
+                      <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal"/>
+                      </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Border Margin="0,0,3,0" Padding="5,1" CornerRadius="3"
+                                Background="{Binding Color, Converter={StaticResource StringToBrush}}">
+                          <TextBlock Text="{Binding Name}" FontSize="9" Foreground="White"/>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
                 </DataTemplate>
               </DataGridTemplateColumn.CellTemplate>
             </DataGridTemplateColumn>
@@ -683,10 +682,14 @@
 
           <!-- Preview content (row 1) -->
           <Grid Grid.Row="1">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
 
-          <!-- No selection placeholder -->
-          <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
-                      Visibility="{Binding ShowAnyPreview, Converter={StaticResource InvBoolToVis}}">
+          <!-- No selection placeholder (row 0) -->
+          <StackPanel Grid.Row="0" HorizontalAlignment="Center" VerticalAlignment="Center"
+                      Visibility="{Binding ShowMetadata, Converter={StaticResource InvBoolToVis}}">
             <TextBlock Text="📄" FontSize="36" HorizontalAlignment="Center" Margin="0,0,0,10"/>
             <TextBlock Text="Select a file" FontSize="13"
                        Foreground="{StaticResource TextSecondary}" HorizontalAlignment="Center"/>
@@ -694,29 +697,24 @@
                        Foreground="{StaticResource TextSecondary}" HorizontalAlignment="Center"/>
           </StackPanel>
 
-          <!-- Preview content -->
-          <Grid Visibility="{Binding ShowAnyPreview, Converter={StaticResource BoolToVis}}">
-            <Grid.RowDefinitions>
-              <RowDefinition Height="*"/>
-              <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
+          <!-- Image or document preview (row 0) -->
+          <Border Grid.Row="0" Margin="12,12,12,8" CornerRadius="8"
+                  Background="{StaticResource BgMid}"
+                  Visibility="{Binding ShowAnyPreview, Converter={StaticResource BoolToVis}}">
+            <Grid>
+              <Image Source="{Binding PreviewImage}"
+                     Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"
+                     Margin="8"
+                     Visibility="{Binding ShowMediaPreview, Converter={StaticResource BoolToVis}}"/>
+              <svc:PreviewHandlerHost FilePath="{Binding PreviewFilePath}"
+                     Visibility="{Binding ShowDocumentPreview, Converter={StaticResource BoolToVis}}"/>
+            </Grid>
+          </Border>
 
-            <!-- Image or document preview -->
-            <Border Grid.Row="0" Margin="12,12,12,8" CornerRadius="8"
-                    Background="{StaticResource BgMid}">
-              <Grid>
-                <Image Source="{Binding PreviewImage}"
-                       Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"
-                       Margin="8"
-                       Visibility="{Binding ShowMediaPreview, Converter={StaticResource BoolToVis}}"/>
-                <svc:PreviewHandlerHost FilePath="{Binding PreviewFilePath}"
-                       Visibility="{Binding ShowDocumentPreview, Converter={StaticResource BoolToVis}}"/>
-              </Grid>
-            </Border>
-
-            <!-- File metadata -->
+            <!-- File metadata (row 1 — shown for any selected file) -->
             <Border Grid.Row="1" Margin="12,0,12,12" Padding="12"
-                    Background="{StaticResource BgMid}" CornerRadius="8">
+                    Background="{StaticResource BgMid}" CornerRadius="8"
+                    Visibility="{Binding ShowMetadata, Converter={StaticResource BoolToVis}}">
               <StackPanel>
                 <TextBlock Text="{Binding SelectedFile.FileName}"
                            FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,6"/>
@@ -879,6 +877,83 @@
                              TextWrapping="Wrap" Foreground="{StaticResource TextSecondary}"/>
                 </Grid>
 
+                <!-- Tags -->
+                <StackPanel Margin="0,10,0,0">
+                  <TextBlock Text="TAGS" FontSize="10" FontWeight="SemiBold"
+                             Foreground="{StaticResource TextSecondary}" Margin="0,0,0,6"/>
+                  <!-- Applied tags -->
+                  <ItemsControl ItemsSource="{Binding SelectedFile.Tags}">
+                    <ItemsControl.ItemsPanel>
+                      <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Border Margin="0,0,4,4" Padding="6,2" CornerRadius="4"
+                                Background="{Binding Color, Converter={StaticResource StringToBrush}}">
+                          <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="{Binding Name}" FontSize="11" Foreground="White"/>
+                            <Button Content="×" Margin="4,0,0,0" Padding="0"
+                                    FontSize="11" Foreground="White"
+                                    Background="Transparent" BorderThickness="0"
+                                    Cursor="Hand"
+                                    Command="{Binding DataContext.RemoveTagCommand,
+                                              RelativeSource={RelativeSource AncestorType=Window}}"
+                                    CommandParameter="{Binding}"/>
+                          </StackPanel>
+                        </Border>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                  <!-- AI-suggested tags -->
+                  <StackPanel Margin="0,4,0,0">
+                    <StackPanel.Style>
+                      <Style TargetType="StackPanel">
+                        <Setter Property="Visibility" Value="Visible"/>
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding SuggestedTags.Count}" Value="0">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                          </DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </StackPanel.Style>
+                    <TextBlock Text="Suggested:" FontSize="10"
+                               Foreground="{StaticResource TextSecondary}" Margin="0,0,0,4"/>
+                    <ItemsControl ItemsSource="{Binding SuggestedTags}">
+                      <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                      </ItemsControl.ItemsPanel>
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                          <Button Margin="0,0,4,4" Padding="6,2" Height="22"
+                                  Style="{StaticResource SecondaryButton}"
+                                  Content="{Binding}"
+                                  Command="{Binding DataContext.AddTagCommand,
+                                            RelativeSource={RelativeSource AncestorType=Window}}"
+                                  CommandParameter="{Binding}"/>
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </StackPanel>
+                  <!-- Add tag input -->
+                  <Grid Margin="0,6,0,0">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="6"/>
+                      <ColumnDefinition Width="32"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBox Grid.Column="0"
+                             Text="{Binding NewTagText, UpdateSourceTrigger=PropertyChanged}"
+                             ToolTip="Type a tag name and press Enter">
+                      <TextBox.InputBindings>
+                        <KeyBinding Key="Return" Command="{Binding CreateAndAddTagCommand}"/>
+                      </TextBox.InputBindings>
+                    </TextBox>
+                    <Button Grid.Column="2" Content="+" Height="28"
+                            Style="{StaticResource PrimaryButton}"
+                            Command="{Binding CreateAndAddTagCommand}"/>
+                  </Grid>
+                </StackPanel>
+
                 <!-- Suggestions -->
                 <StackPanel Margin="0,10,0,0">
                   <StackPanel.Style>
@@ -965,7 +1040,6 @@
 
               </StackPanel>
             </Border>
-          </Grid>
 
           </Grid><!-- /preview content row -->
 
