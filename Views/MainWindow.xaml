@@ -34,11 +34,9 @@
         <Trigger Property="IsMouseOver" Value="True">
           <Setter Property="Background" Value="{StaticResource RowHover}"/>
         </Trigger>
-        <!-- Preview-selected row — always bright regardless of DataGrid focus -->
+        <!-- Preview-selected row -->
         <Trigger Property="IsSelected" Value="True">
           <Setter Property="Background" Value="{StaticResource SelectedRow}"/>
-          <Setter Property="BorderThickness" Value="2,0,0,0"/>
-          <Setter Property="BorderBrush"     Value="{StaticResource Accent}"/>
         </Trigger>
       </Style.Triggers>
     </Style>
@@ -485,7 +483,7 @@
             <ContextMenu>
               <MenuItem Header="Rename…"  Command="{Binding RenameCommand}"/>
               <MenuItem Header="Move to…" Command="{Binding MoveCommand}"/>
-              <Separator/>
+              <Separator Style="{StaticResource MenuSeparatorStyle}"/>
               <MenuItem Header="Delete" Command="{Binding DeleteCommand}"
                         Foreground="#E06C6C"/>
             </ContextMenu>
@@ -500,6 +498,30 @@
           </DataGrid.Resources>
 
           <DataGrid.Columns>
+
+            <!-- Row selection indicator (▶ triangle) -->
+            <DataGridTemplateColumn Width="18" CanUserResize="False">
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Text="▶" FontSize="8"
+                             HorizontalAlignment="Right" VerticalAlignment="Center"
+                             Foreground="{StaticResource Accent}">
+                    <TextBlock.Style>
+                      <Style TargetType="TextBlock">
+                        <Setter Property="Visibility" Value="Collapsed"/>
+                        <Style.Triggers>
+                          <DataTrigger Value="True"
+                              Binding="{Binding IsSelected,
+                                        RelativeSource={RelativeSource AncestorType=DataGridRow}}">
+                            <Setter Property="Visibility" Value="Visible"/>
+                          </DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </TextBlock.Style>
+                  </TextBlock>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
 
             <!-- Checkbox -->
             <DataGridTemplateColumn Width="36" CanUserResize="False">
