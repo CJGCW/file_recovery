@@ -312,22 +312,82 @@
 
             <Separator Margin="0,14,0,14" Background="{StaticResource Border}"/>
 
-            <!-- ▼ CATEGORIES -->
-            <Expander>
+            <!-- ▼ FILE TYPES -->
+            <Expander IsExpanded="True">
               <Expander.Header>
-                <TextBlock Text="CATEGORIES" FontSize="10" FontWeight="SemiBold"
+                <TextBlock Text="FILE TYPES" FontSize="10" FontWeight="SemiBold"
                            Foreground="{StaticResource TextSecondary}"/>
               </Expander.Header>
-              <ItemsControl ItemsSource="{Binding CategoryFilters}" Margin="0,6,0,0">
+              <ItemsControl ItemsSource="{Binding FileTypeGroups}" Margin="0,6,0,0">
                 <ItemsControl.ItemTemplate>
                   <DataTemplate>
-                    <CheckBox IsChecked="{Binding IsChecked}" Margin="0,3">
-                      <StackPanel Orientation="Horizontal">
-                        <Border Width="8" Height="8" CornerRadius="4" Margin="0,0,6,0"
+                    <StackPanel Margin="0,1,0,0">
+                      <!-- Group header row -->
+                      <Grid Height="26">
+                        <Grid.ColumnDefinitions>
+                          <ColumnDefinition Width="18"/>  <!-- expand arrow -->
+                          <ColumnDefinition Width="18"/>  <!-- master checkbox -->
+                          <ColumnDefinition Width="8"/>   <!-- color dot -->
+                          <ColumnDefinition Width="4"/>   <!-- gap -->
+                          <ColumnDefinition Width="*"/>   <!-- label -->
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Expand/collapse arrow button -->
+                        <ToggleButton Grid.Column="0" IsChecked="{Binding IsExpanded}"
+                                      Background="Transparent" BorderThickness="0"
+                                      Cursor="Hand" Focusable="False" Width="18" Height="18">
+                          <ToggleButton.Template>
+                            <ControlTemplate TargetType="ToggleButton">
+                              <Border Background="Transparent">
+                                <TextBlock VerticalAlignment="Center" HorizontalAlignment="Center"
+                                           FontSize="9" Foreground="{StaticResource TextSecondary}">
+                                  <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                      <Setter Property="Text" Value="▶"/>
+                                      <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsExpanded}" Value="True">
+                                          <Setter Property="Text" Value="▼"/>
+                                        </DataTrigger>
+                                      </Style.Triggers>
+                                    </Style>
+                                  </TextBlock.Style>
+                                </TextBlock>
+                              </Border>
+                            </ControlTemplate>
+                          </ToggleButton.Template>
+                        </ToggleButton>
+
+                        <!-- Master tri-state checkbox -->
+                        <CheckBox Grid.Column="1" IsThreeState="True"
+                                  IsChecked="{Binding IsAllChecked}"
+                                  VerticalAlignment="Center"/>
+
+                        <!-- Category color dot -->
+                        <Border Grid.Column="2" Width="8" Height="8" CornerRadius="4"
+                                VerticalAlignment="Center"
                                 Background="{Binding Category, Converter={StaticResource CategoryColorConverter}}"/>
-                        <TextBlock Text="{Binding Label}" FontSize="12"/>
-                      </StackPanel>
-                    </CheckBox>
+
+                        <!-- Category label -->
+                        <TextBlock Grid.Column="4" Text="{Binding Label}"
+                                   FontSize="12" VerticalAlignment="Center"
+                                   Foreground="{StaticResource TextPrimary}"/>
+                      </Grid>
+
+                      <!-- Per-extension checkboxes, shown when group is expanded -->
+                      <ItemsControl Margin="32,0,0,4"
+                                    ItemsSource="{Binding Extensions}"
+                                    Visibility="{Binding IsExpanded, Converter={StaticResource BoolToVis}}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate>
+                            <CheckBox IsChecked="{Binding IsChecked}" Margin="0,2">
+                              <TextBlock Text="{Binding Extension}" FontSize="11"
+                                         FontFamily="Consolas"
+                                         Foreground="{StaticResource TextSecondary}"/>
+                            </CheckBox>
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
                   </DataTemplate>
                 </ItemsControl.ItemTemplate>
               </ItemsControl>
@@ -362,30 +422,6 @@
                 </ItemsControl>
               </Expander>
             </StackPanel>
-
-            <Separator Margin="0,14,0,14" Background="{StaticResource Border}"/>
-
-            <!-- ▶ EXTENSIONS (starts collapsed — can be long) -->
-            <Expander IsExpanded="False">
-              <Expander.Header>
-                <TextBlock Text="EXTENSIONS" FontSize="10" FontWeight="SemiBold"
-                           Foreground="{StaticResource TextSecondary}"/>
-              </Expander.Header>
-              <StackPanel Margin="0,6,0,0">
-                <TextBlock Text="Run a scan to see extensions."
-                           FontSize="11" Foreground="{StaticResource TextSecondary}"
-                           Visibility="{Binding ExtensionFilters.Count, Converter={StaticResource InvBoolToVis}}"/>
-                <ItemsControl ItemsSource="{Binding ExtensionFilters}" MaxHeight="260">
-                  <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                      <CheckBox IsChecked="{Binding IsChecked}" Margin="0,2">
-                        <TextBlock Text="{Binding Extension}" FontSize="12" FontFamily="Consolas"/>
-                      </CheckBox>
-                    </DataTemplate>
-                  </ItemsControl.ItemTemplate>
-                </ItemsControl>
-              </StackPanel>
-            </Expander>
 
             <Separator Margin="0,14,0,14" Background="{StaticResource Border}"/>
             <Button Content="Clear Results" Style="{StaticResource SecondaryButton}"
@@ -862,7 +898,9 @@
           <Grid Grid.Row="1">
             <Grid.RowDefinitions>
               <RowDefinition Height="*"/>
-              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="Auto"/>  <!-- thumbnail strip -->
+              <RowDefinition Height="Auto"/>  <!-- timeline scrubber -->
+              <RowDefinition Height="Auto"/>  <!-- metadata + suggestions -->
             </Grid.RowDefinitions>
 
           <!-- No selection placeholder (row 0) -->
@@ -886,11 +924,117 @@
                      Visibility="{Binding ShowMediaPreview, Converter={StaticResource BoolToVis}}"/>
               <svc:PreviewHandlerHost FilePath="{Binding PreviewFilePath}"
                      Visibility="{Binding ShowDocumentPreview, Converter={StaticResource BoolToVis}}"/>
+              <!-- Deep-scan progress overlay -->
+              <Border VerticalAlignment="Bottom" HorizontalAlignment="Stretch"
+                      Margin="12,0,12,12" Padding="10,8" CornerRadius="6"
+                      Background="#CC0D0D1A"
+                      Visibility="{Binding IsDeepScanning, Converter={StaticResource BoolToVis}}">
+                <StackPanel>
+                  <Grid Margin="0,0,0,6">
+                    <TextBlock Text="Deep scanning…" FontSize="11"
+                               Foreground="{StaticResource TextSecondary}"
+                               HorizontalAlignment="Left"/>
+                    <TextBlock HorizontalAlignment="Right" FontSize="11"
+                               Foreground="{StaticResource Accent}">
+                      <Run Text="{Binding DeepScanProgress, Mode=OneWay, StringFormat={}{0:F0}}"/>
+                      <Run Text="%"/>
+                    </TextBlock>
+                  </Grid>
+                  <!-- Progress bar -->
+                  <ProgressBar Value="{Binding DeepScanProgress, Mode=OneWay}" Minimum="0" Maximum="100"
+                               Height="5" BorderThickness="0">
+                    <ProgressBar.Template>
+                      <ControlTemplate TargetType="ProgressBar">
+                        <Border Background="#33FFFFFF" CornerRadius="3" ClipToBounds="True">
+                          <Border x:Name="PART_Indicator" HorizontalAlignment="Left"
+                                  Background="{StaticResource Accent}" CornerRadius="3"/>
+                        </Border>
+                      </ControlTemplate>
+                    </ProgressBar.Template>
+                  </ProgressBar>
+                </StackPanel>
+              </Border>
             </Grid>
           </Border>
 
-            <!-- File metadata (row 1 — shown for any selected file) -->
-            <Border Grid.Row="1" Margin="12,0,12,12" Padding="12"
+            <!-- Thumbnail strip (row 1 — video only) -->
+            <Border Grid.Row="1" Margin="12,0,12,6" CornerRadius="8"
+                    Background="{StaticResource BgMid}"
+                    Visibility="{Binding ShowThumbnailStrip, Converter={StaticResource BoolToVis}}">
+              <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                            VerticalScrollBarVisibility="Hidden"
+                            Padding="4,6">
+                <ItemsControl ItemsSource="{Binding ThumbnailStrip}">
+                  <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                      <StackPanel Orientation="Horizontal"/>
+                    </ItemsPanelTemplate>
+                  </ItemsControl.ItemsPanel>
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                      <Button Margin="3,0" Padding="0" BorderThickness="0"
+                              Background="Transparent" Cursor="Hand"
+                              Command="{Binding DataContext.SelectThumbnailCommand,
+                                        RelativeSource={RelativeSource AncestorType=Window}}"
+                              CommandParameter="{Binding}">
+                        <Border CornerRadius="4" BorderThickness="2" Width="116" Height="80">
+                          <Border.Style>
+                            <Style TargetType="Border">
+                              <Setter Property="BorderBrush" Value="Transparent"/>
+                              <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                  <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                </DataTrigger>
+                              </Style.Triggers>
+                            </Style>
+                          </Border.Style>
+                          <Grid ClipToBounds="True">
+                            <Image Source="{Binding Image}" Stretch="UniformToFill"
+                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                            <!-- Timestamp label overlaid at bottom -->
+                            <Border VerticalAlignment="Bottom" HorizontalAlignment="Center"
+                                    Padding="4,1" Margin="0,0,0,4" CornerRadius="3"
+                                    Background="#CC000000">
+                              <TextBlock Text="{Binding Label}" FontSize="9"
+                                         Foreground="White" FontFamily="Consolas"/>
+                            </Border>
+                          </Grid>
+                        </Border>
+                      </Button>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </ScrollViewer>
+            </Border>
+
+            <!-- Timeline scrubber (row 2 — video only) -->
+            <Border Grid.Row="2" Margin="12,0,12,4" Padding="8,7" CornerRadius="8"
+                    Background="{StaticResource BgMid}"
+                    Visibility="{Binding ShowTimeline, Converter={StaticResource BoolToVis}}">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="0:00" FontSize="10" FontFamily="Consolas"
+                           Foreground="{StaticResource TextSecondary}"
+                           VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <Slider Grid.Column="1"
+                        Minimum="0" Maximum="{Binding TimelineMax}"
+                        Value="{Binding TimelineValue}"
+                        VerticalAlignment="Center"
+                        IsMoveToPointEnabled="True"/>
+                <TextBlock Grid.Column="2"
+                           Text="{Binding TimelineLabel}"
+                           FontSize="10" FontFamily="Consolas"
+                           Foreground="{StaticResource Accent}"
+                           VerticalAlignment="Center" Margin="6,0,0,0"/>
+              </Grid>
+            </Border>
+
+            <!-- File metadata (row 3 — shown for any selected file) -->
+            <Border Grid.Row="3" Margin="12,0,12,12" Padding="12"
                     Background="{StaticResource BgMid}" CornerRadius="8"
                     Visibility="{Binding ShowMetadata, Converter={StaticResource BoolToVis}}">
               <StackPanel>
@@ -1131,6 +1275,79 @@
                             Command="{Binding CreateAndAddTagCommand}"/>
                   </Grid>
                 </StackPanel>
+
+                <!-- Deep Scan -->
+                <Grid Margin="0,12,0,0">
+                  <Grid.Style>
+                    <Style TargetType="Grid">
+                      <Setter Property="Visibility" Value="Collapsed"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding ShowVideoPreview}" Value="True">
+                          <Setter Property="Visibility" Value="Visible"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Grid.Style>
+                  <Button Command="{Binding DeepScanCommand}"
+                          Height="28" HorizontalAlignment="Stretch"
+                          BorderThickness="0" Cursor="Hand"
+                          Background="#3A3A5C" Foreground="{StaticResource TextPrimary}" FontSize="12">
+                    <Button.Style>
+                      <Style TargetType="Button">
+                        <Setter Property="Content" Value="Deep Scan (every second, 10 min)"/>
+                        <Style.Triggers>
+                          <DataTrigger Binding="{Binding IsDeepScanning}" Value="True">
+                            <Setter Property="Content" Value="Scanning…"/>
+                          </DataTrigger>
+                        </Style.Triggers>
+                      </Style>
+                    </Button.Style>
+                  </Button>
+                </Grid>
+
+                <!-- Identify Episode -->
+                <Button Margin="0,6,0,0"
+                        Command="{Binding IdentifyEpisodeCommand}"
+                        Height="28" HorizontalAlignment="Stretch"
+                        BorderThickness="0" Cursor="Hand"
+                        Background="#7C6FF7" Foreground="White" FontSize="12">
+                  <Button.Style>
+                    <Style TargetType="Button">
+                      <Setter Property="Content" Value="Identify Episode"/>
+                      <Setter Property="Visibility" Value="Collapsed"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding ShowVideoPreview}" Value="True">
+                          <Setter Property="Visibility" Value="Visible"/>
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding IsIdentifying}" Value="True">
+                          <Setter Property="Content" Value="Identifying..."/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Button.Style>
+                </Button>
+
+                <!-- Identify Icon -->
+                <Button Margin="0,8,0,0"
+                        Command="{Binding IdentifyIconCommand}"
+                        Height="28" HorizontalAlignment="Stretch"
+                        BorderThickness="0" Cursor="Hand"
+                        Background="#5B8DD9" Foreground="White" FontSize="12">
+                  <Button.Style>
+                    <Style TargetType="Button">
+                      <Setter Property="Content" Value="Identify Icon"/>
+                      <Setter Property="Visibility" Value="Collapsed"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding ShowIconIdentify}" Value="True">
+                          <Setter Property="Visibility" Value="Visible"/>
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding IsIdentifying}" Value="True">
+                          <Setter Property="Content" Value="Identifying..."/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Button.Style>
+                </Button>
 
                 <!-- Suggestions -->
                 <StackPanel Margin="0,10,0,0">

@@ -33,6 +33,13 @@ public class MainViewModel : INotifyPropertyChanged
     private bool    _isPreviewMaximized;
     private bool    _isDetectingDuplicates;
     private CancellationTokenSource? _ocrCts;
+    private CancellationTokenSource? _thumbCts;
+    private CancellationTokenSource? _timelineCts;
+    private double _timelineValue;
+    private bool   _isDeepScanning;
+    private double _deepScanProgress;
+    private bool   _isIdentifying;
+    private AppSettings _appSettings = AppSettings.Load();
     private string _sortColumn = nameof(FileRecord.FileName);
     private ListSortDirection _sortDirection = ListSortDirection.Ascending;
     private CancellationTokenSource? _scanCts;
@@ -60,9 +67,9 @@ public class MainViewModel : INotifyPropertyChanged
     private readonly ObservableCollection<FileRecord> _allFiles = [];
     public  ICollectionView FileView { get; }
 
-    public ObservableCollection<CategoryFilter>  CategoryFilters   { get; } = [];
-    public ObservableCollection<ExtensionFilter> ExtensionFilters  { get; } = [];
-    public ObservableCollection<ImageGroupFilter> ImageGroupFilters { get; } = [];
+    public ObservableCollection<CategoryExtensionGroup> FileTypeGroups    { get; } = [];
+    public ObservableCollection<ImageGroupFilter>        ImageGroupFilters { get; } = [];
+    public ObservableCollection<VideoFrame>              ThumbnailStrip    { get; } = [];
 
     // ── Constructor ──────────────────────────────────────────────────────────
 
@@ -76,6 +83,7 @@ public class MainViewModel : INotifyPropertyChanged
 
         AllTags        = new ObservableCollection<TagDefinition>(_tagStore.Definitions);
         SearchPatterns = [];
+        ThumbnailStrip.CollectionChanged += (_, _) => OnPropertyChanged(nameof(ShowThumbnailStrip));
 
         ScanCommand            = new RelayCommand(_ => { if (_ is string s) StartScan(s); else StartScan(FolderPath); }, _ => !IsScanning);
         CancelCommand          = new RelayCommand(_ => { _scanCts?.Cancel(); _searchCts?.Cancel(); },
@@ -93,6 +101,19 @@ public class MainViewModel : INotifyPropertyChanged
         AddTagCommand                  = new RelayCommand(p => AddTag(p as string), _ => SelectedFile is not null);
         RemoveTagCommand               = new RelayCommand(p => RemoveTag(p as TagDefinition), _ => SelectedFile is not null);
         CreateAndAddTagCommand         = new RelayCommand(_ => CreateAndAddTag(), _ => SelectedFile is not null && !string.IsNullOrWhiteSpace(NewTagText));
+        DeepScanCommand                = new RelayCommand(_ => DeepScanAsync(),
+                                             _ => ShowVideoPreview && !_isDeepScanning && !_isIdentifying);
+        SelectThumbnailCommand         = new RelayCommand(p =>
+        {
+            if (p is not VideoFrame f) return;
+            PreviewImage = f.Image;
+            foreach (var t in ThumbnailStrip) t.IsSelected = false;
+            f.IsSelected = true;
+        });
+        IdentifyEpisodeCommand         = new RelayCommand(_ => IdentifyEpisodeAsync(),
+                                             _ => ShowVideoPreview && PreviewImage is not null && !_isIdentifying && !_isDeepScanning);
+        IdentifyIconCommand            = new RelayCommand(_ => IdentifyIconAsync(),
+                                             _ => ShowIconIdentify && PreviewImage is not null && !_isIdentifying);
         AddSearchPatternCommand        = new RelayCommand(_ => AddSearchPattern(), _ => !string.IsNullOrWhiteSpace(NewSearchText));
         RemoveSearchPatternCommand     = new RelayCommand(p => RemoveSearchPattern(p as SearchPattern));
         RunSearchCommand               = new RelayCommand(_ => RunSearch(),
@@ -100,7 +121,7 @@ public class MainViewModel : INotifyPropertyChanged
         ClearSearchCommand             = new RelayCommand(_ => ClearSearch(),
                                              _ => SearchPatterns.Count > 0 || _allFiles.Any(f => f.MatchedPatterns.Count > 0));
 
-        InitialiseCategoryFilters();
+        InitialiseFileTypeGroups();
     }
 
     // ── Properties ───────────────────────────────────────────────────────────
@@ -169,6 +190,7 @@ public class MainViewModel : INotifyPropertyChanged
             _selectedFile = value;
             OnPropertyChanged();
             OnPropertyChanged(nameof(ShowMetadata));
+            OnPropertyChanged(nameof(TimelineMax));
             LoadPreview(value);
             CurrentSuggestions = value is not null
                 ? _suggestionCache.GetValueOrDefault(value.Id, [])
@@ -186,13 +208,62 @@ public class MainViewModel : INotifyPropertyChanged
     public bool ShowImagePreview
     {
         get => _showImagePreview;
-        set { _showImagePreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowMediaPreview)); OnPropertyChanged(nameof(ShowAnyPreview)); }
+        set { _showImagePreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowMediaPreview)); OnPropertyChanged(nameof(ShowAnyPreview)); OnPropertyChanged(nameof(ShowIconIdentify)); }
+    }
+
+    public bool ShowIconIdentify    => _showImagePreview && _selectedFile?.ImageGroup == ImageSubcategory.Icon;
+    public bool ShowThumbnailStrip  => _showVideoPreview && ThumbnailStrip.Count > 0;
+    public bool ShowTimeline        => _showVideoPreview;
+
+    public double TimelineMax => SelectedFile?.Duration?.TotalSeconds ?? 600;
+
+    public double TimelineValue
+    {
+        get => _timelineValue;
+        set
+        {
+            _timelineValue = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(TimelineLabel));
+            SeekTimeline(value);
+        }
+    }
+
+    public string TimelineLabel
+    {
+        get
+        {
+            var ts = TimeSpan.FromSeconds(_timelineValue);
+            return ts.TotalHours >= 1
+                ? ts.ToString(@"h\:mm\:ss")
+                : ts.ToString(@"m\:ss");
+        }
+    }
+
+    private async void SeekTimeline(double seconds)
+    {
+        _timelineCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _timelineCts = cts;
+        var ct     = cts.Token;
+        var record = SelectedFile;
+        if (record is null) return;
+
+        try
+        {
+            await Task.Delay(150, ct);
+            var bmp = await VideoThumbnailService.GetFrameAtPositionAsync(
+                record.FullPath, TimeSpan.FromSeconds(seconds), 420, ct);
+            if (bmp is not null && SelectedFile?.Id == record.Id)
+                Application.Current.Dispatcher.Invoke(() => PreviewImage = bmp);
+        }
+        catch (OperationCanceledException) { }
     }
 
     public bool ShowVideoPreview
     {
         get => _showVideoPreview;
-        set { _showVideoPreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowMediaPreview)); OnPropertyChanged(nameof(ShowAnyPreview)); }
+        set { _showVideoPreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowMediaPreview)); OnPropertyChanged(nameof(ShowAnyPreview)); OnPropertyChanged(nameof(ShowThumbnailStrip)); OnPropertyChanged(nameof(ShowTimeline)); }
     }
 
     public bool ShowDocumentPreview
@@ -201,8 +272,26 @@ public class MainViewModel : INotifyPropertyChanged
         set { _showDocumentPreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowAnyPreview)); }
     }
 
+    public bool IsDeepScanning
+    {
+        get => _isDeepScanning;
+        private set { _isDeepScanning = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowAnyPreview)); CommandManager.InvalidateRequerySuggested(); }
+    }
+
+    public double DeepScanProgress
+    {
+        get => _deepScanProgress;
+        private set { _deepScanProgress = value; OnPropertyChanged(); }
+    }
+
+    public bool IsIdentifying
+    {
+        get => _isIdentifying;
+        private set { _isIdentifying = value; OnPropertyChanged(); CommandManager.InvalidateRequerySuggested(); }
+    }
+
     public bool ShowMediaPreview   => _showImagePreview || _showVideoPreview;
-    public bool ShowAnyPreview     => _showImagePreview || _showVideoPreview || _showDocumentPreview;
+    public bool ShowAnyPreview     => _showImagePreview || _showVideoPreview || _showDocumentPreview || _isDeepScanning;
 
     public bool IsPreviewMaximized
     {
@@ -299,6 +388,10 @@ public class MainViewModel : INotifyPropertyChanged
     public ICommand RemoveSearchPatternCommand   { get; }
     public ICommand RunSearchCommand             { get; }
     public ICommand ClearSearchCommand           { get; }
+    public ICommand DeepScanCommand              { get; }
+    public ICommand SelectThumbnailCommand       { get; }
+    public ICommand IdentifyEpisodeCommand       { get; }
+    public ICommand IdentifyIconCommand          { get; }
 
     // ── Scanning ─────────────────────────────────────────────────────────────
 
@@ -330,15 +423,11 @@ public class MainViewModel : INotifyPropertyChanged
         AllTags.Clear();
         foreach (var t in _tagStore.Definitions) AllTags.Add(t);
 
-        var allowedExtensions = ExtensionFilters
-            .Where(f => f.IsChecked)
-            .Select(f => f.Extension)
+        var allowedExtensions = FileTypeGroups
+            .SelectMany(g => g.Extensions.Where(e => e.IsChecked).Select(e => e.Extension))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var allowedCategories = CategoryFilters
-            .Where(f => f.IsChecked)
-            .Select(f => f.Category)
-            .ToHashSet();
+        bool allExtensionsAllowed = allowedExtensions.Count ==
+            FileTypeGroups.Sum(g => g.Extensions.Count);
 
         Task.Run(async () =>
         {
@@ -351,10 +440,7 @@ public class MainViewModel : INotifyPropertyChanged
                 {
                     if (ct.IsCancellationRequested) break;
 
-                    if (allowedCategories.Count > 0 && !allowedCategories.Contains(record.Category))
-                    { skipped++; continue; }
-
-                    if (allowedExtensions.Count > 0 && !allowedExtensions.Contains(record.Extension))
+                    if (!allExtensionsAllowed && !allowedExtensions.Contains(record.Extension))
                     { skipped++; continue; }
 
                     record.PropertyChanged += Record_PropertyChanged;
@@ -454,6 +540,7 @@ public class MainViewModel : INotifyPropertyChanged
         CurrentSuggestions  = [];
         SuggestedTags       = [];
         ImageGroupFilters.Clear();
+        ThumbnailStrip.Clear();
         PreviewImage        = null;
         ShowImagePreview    = false;
         ShowVideoPreview    = false;
@@ -992,17 +1079,11 @@ public class MainViewModel : INotifyPropertyChanged
                 return false;
         }
 
-        if (CategoryFilters.Any(f => !f.IsChecked))
+        if (FileTypeGroups.Any(g => g.Extensions.Any(e => !e.IsChecked)))
         {
-            var allowed = CategoryFilters.Where(f => f.IsChecked).Select(f => f.Category).ToHashSet();
-            if (!allowed.Contains(r.Category)) return false;
-        }
-
-        if (ExtensionFilters.Count > 0 && ExtensionFilters.Any(f => !f.IsChecked))
-        {
-            var allowed = ExtensionFilters.Where(f => f.IsChecked)
-                                          .Select(f => f.Extension)
-                                          .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var allowed = FileTypeGroups
+                .SelectMany(g => g.Extensions.Where(e => e.IsChecked).Select(e => e.Extension))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             if (!allowed.Contains(r.Extension)) return false;
         }
 
@@ -1041,17 +1122,26 @@ public class MainViewModel : INotifyPropertyChanged
 
     // ── Preview ──────────────────────────────────────────────────────────────
 
-    private void LoadPreview(FileRecord? record)
+    private async void LoadPreview(FileRecord? record)
     {
-        // Cancel any in-flight video OCR from the previously selected file
+        // Cancel any in-flight thumbnail loading or OCR from the previous selection
+        _thumbCts?.Cancel();
+        _thumbCts = null;
         _ocrCts?.Cancel();
-        _ocrCts = null;
+        _ocrCts   = null;
 
         PreviewImage        = null;
         ShowImagePreview    = false;
         ShowVideoPreview    = false;
         ShowDocumentPreview = false;
         PreviewFilePath     = null;
+        IsDeepScanning      = false;
+        ThumbnailStrip.Clear();
+        _timelineCts?.Cancel();
+        _timelineCts  = null;
+        _timelineValue = 0;
+        OnPropertyChanged(nameof(TimelineValue));
+        OnPropertyChanged(nameof(TimelineLabel));
 
         if (record is null || !File.Exists(record.FullPath))
         {
@@ -1061,22 +1151,40 @@ public class MainViewModel : INotifyPropertyChanged
 
         if (record.Category == FileCategory.Video)
         {
-            var thumbnail = VideoThumbnailService.GetThumbnail(record.FullPath);
-            if (thumbnail is not null)
-            {
-                PreviewImage     = thumbnail;
-                ShowVideoPreview = true;
-            }
+            var cts = new CancellationTokenSource();
+            _thumbCts = cts;
+            var ct = cts.Token;
 
-            // OCR the thumbnail frame for title-card text
-            if (thumbnail is not null)
+            // ── Quick scan: 6 positions → populate thumbnail strip ────────────
+            BitmapSource? firstFrame = null;
+            await VideoThumbnailService.GetQuickFramesAsync(
+                record.FullPath, 420, ct,
+                (pos, bmp) => Application.Current.Dispatcher.Invoke(() =>
+                {
+                    if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
+                    var isFirst = ThumbnailStrip.Count == 0;
+                    var frame   = new VideoFrame(bmp, pos) { IsSelected = isFirst };
+                    ThumbnailStrip.Add(frame);
+                    if (isFirst)
+                    {
+                        firstFrame       = bmp;
+                        PreviewImage     = bmp;
+                        ShowVideoPreview = true;
+                    }
+                }));
+
+            if (ct.IsCancellationRequested) return;
+
+            // OCR first captured frame for title-card text
+            if (firstFrame is not null)
             {
                 _ocrCts = new CancellationTokenSource();
-                var ct  = _ocrCts.Token;
+                var ocrCt  = _ocrCts.Token;
+                var ocrBmp = firstFrame;
                 _ = Task.Run(async () =>
                 {
-                    var title = await VideoTitleOcrService.ScanForTitleAsync(thumbnail, ct);
-                    if (title is not null && !ct.IsCancellationRequested)
+                    var title = await VideoTitleOcrService.ScanForTitleAsync(ocrBmp, ocrCt);
+                    if (title is not null && !ocrCt.IsCancellationRequested)
                         Application.Current.Dispatcher.Invoke(() =>
                         {
                             if (SelectedFile?.Id != record.Id) return;
@@ -1086,10 +1194,10 @@ public class MainViewModel : INotifyPropertyChanged
                                 Confidence: 0.70f, Source: "video-ocr"));
                             CurrentSuggestions = existing;
                         });
-                }, ct);
+                }, ocrCt);
             }
 
-            // Add filename-parsed title as a suggestion too (fast, no OCR needed)
+            // Filename-parsed title suggestion
             if (record.VideoInfo?.BestTitle is string parsedTitle
                 && string.IsNullOrWhiteSpace(record.VideoInfo.EmbeddedTitle))
             {
@@ -1100,10 +1208,12 @@ public class MainViewModel : INotifyPropertyChanged
                     SuggestedName: label, SuggestedFolder: null,
                     Confidence: 0.55f, Source: "filename")];
             }
+
+            // Deep scan is on-demand — user presses the "Deep Scan" button.
         }
         else if (record.Category == FileCategory.Image)
         {
-            Task.Run(() =>
+            _ = Task.Run(() =>
             {
                 try
                 {
@@ -1132,31 +1242,243 @@ public class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    // ── Category filter setup ────────────────────────────────────────────────
+    // ── Episode identification ────────────────────────────────────────────────
 
-    private void InitialiseCategoryFilters()
+    private async void DeepScanAsync()
     {
-        foreach (FileCategory cat in Enum.GetValues<FileCategory>())
+        if (SelectedFile is null || _thumbCts is null) return;
+
+        var record = SelectedFile;
+        var ct     = _thumbCts.Token;
+
+        IsDeepScanning   = true;
+        DeepScanProgress = 0;
+        StatusText       = "Deep scanning...";
+        var progress = new Progress<double>(p => DeepScanProgress = p);
+        try
         {
-            if (cat == FileCategory.Unknown) continue;
-            var filter = new CategoryFilter(cat, onChanged: () => FileView.Refresh());
-            CategoryFilters.Add(filter);
+            var (deepThumb, deepPos) = await VideoThumbnailService.ScanDeepAsync(
+                record.FullPath, 420, ct, progress);
+            if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
+
+            if (deepThumb is not null)
+            {
+                PreviewImage = deepThumb;
+                foreach (var f in ThumbnailStrip) f.IsSelected = false;
+                var deepFrame = new VideoFrame(deepThumb, deepPos) { IsSelected = true };
+                ThumbnailStrip.Add(deepFrame);
+            }
+
+            StatusText = deepThumb is not null
+                ? $"Deep scan complete — best frame at {deepPos:m\\:ss}."
+                : "Deep scan: no better frame found.";
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { StatusText = $"Deep scan failed: {ex.Message}"; }
+        finally
+        {
+            if (!ct.IsCancellationRequested)
+            {
+                IsDeepScanning   = false;
+                DeepScanProgress = 0;
+            }
         }
     }
 
-    public void PopulateExtensionFilters()
+    private async void IdentifyEpisodeAsync()
     {
-        var seen = _allFiles
-            .Select(f => f.Extension)
-            .Where(e => !string.IsNullOrEmpty(e))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(e => e)
-            .ToList();
+        if (PreviewImage is null || SelectedFile is null) return;
 
-        ExtensionFilters.Clear();
-        foreach (var ext in seen)
-            ExtensionFilters.Add(new ExtensionFilter(ext, onChanged: () => FileView.Refresh()));
+        IsIdentifying = true;
+        StatusText    = "Identifying...";
+
+        var record = SelectedFile;
+        var frame  = PreviewImage;
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var ct = cts.Token;
+
+        try
+        {
+            var results = new List<SuggestionResult>();
+
+            // ── OCR — always runs, no key needed ────────────────────────────
+            var ocrLines = await Task.Run(
+                () => VideoTitleOcrService.ScanAllTextAsync(frame, ct), ct);
+            if (ocrLines.Count > 0)
+            {
+                results.Add(new SuggestionResult(
+                    SuggestedName:   string.Join("  •  ", ocrLines.Take(5)),
+                    SuggestedFolder: null,
+                    Confidence:      0.45f,
+                    Source:          "ocr"));
+            }
+
+            // ── Reverse image search — no key needed ─────────────────────────
+            var imgQuery = await Task.Run(
+                () => ReverseImageSearchService.SearchAsync(frame, ct), ct);
+            if (imgQuery is not null)
+            {
+                results.Add(new SuggestionResult(
+                    SuggestedName:   imgQuery,
+                    SuggestedFolder: null,
+                    Confidence:      0.65f,
+                    Source:          "image-search"));
+            }
+
+            // ── Vision + TMDB — optional, only when keys are configured ──────
+            if (!string.IsNullOrWhiteSpace(_appSettings.GoogleVisionKey))
+            {
+                try
+                {
+                    var visionResults = await Task.Run(
+                        () => EpisodeIdentifier.IdentifyAsync(frame, _appSettings, ct), ct);
+                    results.AddRange(visionResults);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch { /* Vision is optional enrichment */ }
+            }
+
+            if (SelectedFile?.Id != record.Id) return;
+
+            if (results.Count > 0)
+            {
+                var replaced = new HashSet<string>
+                    { "ocr", "image-search", "vision", "vision+tmdb" };
+                CurrentSuggestions = results
+                    .Concat(CurrentSuggestions.Where(s => !replaced.Contains(s.Source)))
+                    .ToList();
+                StatusText = $"Found {results.Count} result(s).";
+            }
+            else
+            {
+                StatusText = "No match found. Try a different frame position.";
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            StatusText = $"Identification failed: {ex.Message}";
+        }
+        finally
+        {
+            IsIdentifying = false;
+        }
     }
+
+    private async void IdentifyIconAsync()
+    {
+        if (PreviewImage is null || SelectedFile is null) return;
+
+        if (string.IsNullOrWhiteSpace(_appSettings.GoogleVisionKey))
+        {
+            ConfigureApiKeys();
+            if (string.IsNullOrWhiteSpace(_appSettings.GoogleVisionKey)) return;
+        }
+
+        IsIdentifying = true;
+        StatusText    = "Identifying icon...";
+
+        var record = SelectedFile;
+        var frame  = PreviewImage;
+
+        try
+        {
+            var logos = await Task.Run(() =>
+                GoogleVisionService.DetectLogoAsync(frame, _appSettings.GoogleVisionKey));
+
+            if (SelectedFile?.Id != record.Id) return;
+
+            if (logos.Count > 0)
+            {
+                var results = logos.Take(3)
+                    .Select(l => new SuggestionResult(
+                        SuggestedName:   $"{l.Name}{record.Extension}",
+                        SuggestedFolder: $"Icons\\{l.Name}\\",
+                        Confidence:      l.Score,
+                        Source:          "vision+logo"))
+                    .ToList<SuggestionResult>();
+
+                var merged = results.Concat(CurrentSuggestions
+                    .Where(s => s.Source != "vision+logo"))
+                    .ToList();
+                CurrentSuggestions = merged;
+                StatusText = $"Identified as: {logos[0].Name}";
+            }
+            else
+            {
+                StatusText = "No logo match found.";
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            StatusText = $"Icon identification failed: {ex.Message}";
+        }
+        finally
+        {
+            IsIdentifying = false;
+        }
+    }
+
+    private void ConfigureApiKeys()
+    {
+        var dialog = new Views.ApiKeyDialog(_appSettings)
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (dialog.ShowDialog() != true) return;
+
+        _appSettings.GoogleVisionKey = dialog.VisionKey;
+        _appSettings.TmdbKey         = dialog.TmdbKey;
+        _appSettings.Save();
+    }
+
+    // ── Category filter setup ────────────────────────────────────────────────
+
+    private void InitialiseFileTypeGroups()
+    {
+        var categoryOrder = new[]
+        {
+            FileCategory.Image, FileCategory.Video, FileCategory.Audio,
+            FileCategory.Document, FileCategory.Archive, FileCategory.Code,
+            FileCategory.Font, FileCategory.Database, FileCategory.Executable,
+        };
+
+        var byCategory = Data.ExtensionMap.Entries
+            .GroupBy(kvp => kvp.Value.Category)
+            .ToDictionary(g => g.Key, g => g.Select(kvp => kvp.Key).OrderBy(e => e).ToList());
+
+        foreach (var cat in categoryOrder)
+        {
+            if (!byCategory.TryGetValue(cat, out var exts)) continue;
+
+            var group = new CategoryExtensionGroup(cat, CategoryLabel(cat),
+                onGroupChanged: () => FileView.Refresh());
+
+            foreach (var ext in exts)
+                group.AddExtension(ext);
+
+            FileTypeGroups.Add(group);
+        }
+    }
+
+    private static string CategoryLabel(FileCategory cat) => cat switch
+    {
+        FileCategory.Image      => "Images",
+        FileCategory.Video      => "Videos",
+        FileCategory.Audio      => "Audio",
+        FileCategory.Document   => "Documents",
+        FileCategory.Archive    => "Archives",
+        FileCategory.Code       => "Code",
+        FileCategory.Font       => "Fonts",
+        FileCategory.Database   => "Databases",
+        FileCategory.Executable => "Executables",
+        _                       => cat.ToString(),
+    };
+
+    // Kept so existing callers in MainWindow.xaml.cs compile; no longer needed.
+    public void PopulateExtensionFilters() { }
 
     public void PopulateImageGroupFilters()
     {
@@ -1185,22 +1507,55 @@ public class MainViewModel : INotifyPropertyChanged
 
 // ── Helper filter models ─────────────────────────────────────────────────────
 
-public class CategoryFilter : INotifyPropertyChanged
+public class CategoryExtensionGroup : INotifyPropertyChanged
 {
-    private bool _isChecked = true;
-    private readonly Action _onChanged;
+    private bool _isExpanded;
+    private readonly Action _onGroupChanged;
 
-    public FileCategory Category  { get; }
-    public string       Label     => Category.ToString();
+    public FileCategory Category { get; }
+    public string       Label    { get; }
+    public ObservableCollection<ExtensionFilter> Extensions { get; } = [];
 
-    public bool IsChecked
+    public bool IsExpanded
     {
-        get => _isChecked;
-        set { _isChecked = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsChecked))); _onChanged(); }
+        get => _isExpanded;
+        set { _isExpanded = value; RaisePropertyChanged(); }
     }
 
-    public CategoryFilter(FileCategory category, Action onChanged)
-    { Category = category; _onChanged = onChanged; }
+    // Tri-state: true=all, false=none, null=mixed
+    public bool? IsAllChecked
+    {
+        get
+        {
+            int n = Extensions.Count(e => e.IsChecked);
+            if (n == Extensions.Count) return true;
+            if (n == 0) return false;
+            return null;
+        }
+        set
+        {
+            bool check = value ?? false; // clicking from all-checked (→ indeterminate) → uncheck all
+            foreach (var ext in Extensions)
+                ext.SetChecked(check);
+            RaisePropertyChanged();
+            _onGroupChanged();
+        }
+    }
+
+    internal void AddExtension(string ext)
+    {
+        Extensions.Add(new ExtensionFilter(ext, onChanged: () =>
+        {
+            RaisePropertyChanged(nameof(IsAllChecked));
+            _onGroupChanged();
+        }));
+    }
+
+    public CategoryExtensionGroup(FileCategory category, string label, Action onGroupChanged)
+    { Category = category; Label = label; _onGroupChanged = onGroupChanged; }
+
+    private void RaisePropertyChanged([System.Runtime.CompilerServices.CallerMemberName] string? name = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
     public event PropertyChangedEventHandler? PropertyChanged;
 }
@@ -1215,7 +1570,20 @@ public class ExtensionFilter : INotifyPropertyChanged
     public bool IsChecked
     {
         get => _isChecked;
-        set { _isChecked = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsChecked))); _onChanged(); }
+        set
+        {
+            if (_isChecked == value) return;
+            _isChecked = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsChecked)));
+            _onChanged();
+        }
+    }
+
+    // Bulk-update path: fires PropertyChanged but not _onChanged (caller handles refresh)
+    internal void SetChecked(bool value)
+    {
+        _isChecked = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsChecked)));
     }
 
     public ExtensionFilter(string extension, Action onChanged)
