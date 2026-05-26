@@ -2,6 +2,9 @@
 bin/
 obj/
 
+# Bundled ffmpeg binary (~100 MB) — downloaded separately, see CLAUDE.md
+tools/ffmpeg.exe
+
 # User-specific files
 *.user
 *.suo

@@ -1,3 +1,6 @@
+using System.Buffers.Binary;
+using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
@@ -30,6 +33,7 @@ public static class VideoThumbnailService
     private static Guid _mtSubtype      = new("f7e34c9a-42e8-4714-b74b-cb29d72c35e5");
     private static Guid _mtFrameSize    = new("1652c33d-d6b2-4012-b834-72030849a37d");
     private static Guid _mtDefaultStride = new("644b4e48-1e02-4516-b0eb-c01ca9d49ac6");
+    private static Guid _mtFrameRate    = new("c459a2e8-3d2c-4e44-b132-fee5156c7bb0");
     private static Guid _mediaTypeVideo = new("73646976-0000-0010-8000-00AA00389B71");
     private static Guid _videoFmtRgb32  = new("00000016-0000-0010-8000-00AA00389B71");
 
@@ -57,44 +61,17 @@ public static class VideoThumbnailService
         Task.Run(() => ExtractQuickFrames(filePath, size, ct, onFrame), ct);
 
     /// <summary>
-    /// Scans every second from 1 s to 10 min, returning the first frame whose
-    /// centre strip has average brightness above the usability threshold,
-    /// together with its timestamp.  Reports 0–100 progress via
-    /// <paramref name="progress"/> as each second is attempted.
+    /// Scans every second from 1 s to 10 min and invokes <paramref name="onFrame"/>
+    /// for every successfully-decoded frame.  Reports 0–100 progress via
+    /// <paramref name="progress"/> as each second is attempted.  Runs on a
+    /// thread-pool thread; the callback is invoked from that thread so the
+    /// caller must dispatch to the UI thread if required.
     /// </summary>
-    public static Task<(BitmapSource? Frame, TimeSpan Position)> ScanDeepAsync(
+    public static Task ScanDeepAsync(
         string filePath, int size, CancellationToken ct,
+        Action<TimeSpan, BitmapSource> onFrame,
         IProgress<double>? progress = null) =>
-        Task.Run(() => ScanDeep(filePath, size, ct, progress), ct);
-
-    /// <summary>
-    /// Extracts a single frame at the given <paramref name="position"/>.
-    /// Returns null if the position is past the end of the file or decoding fails.
-    /// </summary>
-    public static Task<BitmapSource?> GetFrameAtPositionAsync(
-        string filePath, TimeSpan position, int size, CancellationToken ct) =>
-        Task.Run(() =>
-        {
-            if (MFStartup(0x00020070, 1) != 0) return null;
-            try
-            {
-                if (MFCreateSourceReaderFromURL(filePath, IntPtr.Zero, out var reader) != 0 || reader is null)
-                    return null;
-                try
-                {
-                    if (!SetupVideoReader(reader, out int width, out int height,
-                            out int absStride, out bool bottomUp))
-                        return null;
-
-                    if (position == TimeSpan.Zero)
-                        return ReadSequentialFrame(reader, width, height, absStride, bottomUp, size);
-
-                    return ReadFrameAt(reader, position.Ticks, width, height, absStride, bottomUp, size);
-                }
-                finally { Marshal.ReleaseComObject(reader); }
-            }
-            finally { MFShutdown(); }
-        }, ct);
+        Task.Run(() => ScanDeep(filePath, size, ct, onFrame, progress), ct);
 
     private static void ExtractQuickFrames(
         string filePath, int size, CancellationToken ct,
@@ -115,7 +92,7 @@ public static class VideoThumbnailService
             try
             {
                 if (!SetupVideoReader(reader, out int width, out int height,
-                        out int absStride, out bool bottomUp))
+                        out int absStride, out bool bottomUp, out _))
                 {
                     FallbackShell(filePath, size, onFrame);
                     return;
@@ -159,46 +136,130 @@ public static class VideoThumbnailService
         if (bmp is not null) onFrame(TimeSpan.Zero, bmp);
     }
 
-    private static (BitmapSource? Frame, TimeSpan Position) ScanDeep(
-        string filePath, int size, CancellationToken ct, IProgress<double>? progress = null)
+    private static void ScanDeep(
+        string filePath, int size, CancellationToken ct,
+        Action<TimeSpan, BitmapSource> onFrame,
+        IProgress<double>? progress = null)
     {
-        if (MFStartup(0x00020070, 1) != 0) return (null, TimeSpan.Zero);
+        // Pipes BMP frames out of bundled ffmpeg at 1 fps, up to MaxSecond
+        // frames. ffmpeg handles arbitrary containers (MKV, AVI, etc.) and
+        // codecs that Media Foundation can't decode reliably.
+        const int MaxSecond = 600;
+
+        var ffmpegPath = ResolveFfmpegPath();
+        if (ffmpegPath is null) return;
+
+        var psi = new ProcessStartInfo
+        {
+            FileName               = ffmpegPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError  = true,
+            UseShellExecute        = false,
+            CreateNoWindow         = true,
+        };
+        psi.ArgumentList.Add("-v");           psi.ArgumentList.Add("error");
+        psi.ArgumentList.Add("-nostdin");
+        psi.ArgumentList.Add("-i");           psi.ArgumentList.Add(filePath);
+        psi.ArgumentList.Add("-vf");          psi.ArgumentList.Add($"fps=1,scale={size}:-2");
+        psi.ArgumentList.Add("-frames:v");    psi.ArgumentList.Add(MaxSecond.ToString());
+        psi.ArgumentList.Add("-c:v");         psi.ArgumentList.Add("bmp");
+        psi.ArgumentList.Add("-f");           psi.ArgumentList.Add("image2pipe");
+        psi.ArgumentList.Add("pipe:1");
+
+        var proc = Process.Start(psi);
+        if (proc is null) return;
+
+        // Drain stderr in the background so ffmpeg doesn't block on a full pipe.
+        _ = Task.Run(() => { try { proc.StandardError.ReadToEnd(); } catch { } });
+
+        using var ctReg = ct.Register(() =>
+        {
+            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
+        });
+
         try
         {
-            if (MFCreateSourceReaderFromURL(filePath, IntPtr.Zero, out var reader) != 0 || reader is null)
-                return (null, TimeSpan.Zero);
-            try
+            int second = 1;
+            var stream = proc.StandardOutput.BaseStream;
+            while (second <= MaxSecond && !ct.IsCancellationRequested)
             {
-                if (!SetupVideoReader(reader, out int width, out int height,
-                        out int absStride, out bool bottomUp))
-                    return (null, TimeSpan.Zero);
-
-                for (int sec = 1; sec <= 600 && !ct.IsCancellationRequested; sec++)
-                {
-                    progress?.Report(sec / 600.0 * 100.0);
-
-                    var guidNull = Guid.Empty;
-                    var pv = new PropVariantI8 { VarType = 20, Value = (long)sec * TimeSpan.TicksPerSecond };
-                    if (reader.SetCurrentPosition(ref guidNull, ref pv) != 0) break;
-
-                    var (found, eos, bmp) = TryGetBrightFrame(
-                        reader, width, height, absStride, bottomUp, size);
-                    if (found) return (bmp, TimeSpan.FromSeconds(sec));
-                    if (eos)   break;
-                }
-                return (null, TimeSpan.Zero);
+                var bmp = ReadOneBmp(stream, ct);
+                if (bmp is null) break;
+                onFrame(TimeSpan.FromSeconds(second), bmp);
+                progress?.Report(second / (double)MaxSecond * 100.0);
+                second++;
             }
-            finally { Marshal.ReleaseComObject(reader); }
         }
-        finally { MFShutdown(); }
+        finally
+        {
+            try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
+            try { proc.WaitForExit(2000); } catch { }
+            proc.Dispose();
+        }
+    }
+
+    private static BitmapSource? ReadOneBmp(Stream stream, CancellationToken ct)
+    {
+        // BMP file header (14 bytes): "BM", little-endian uint32 file size at [2..6], reserved, data offset.
+        var header = new byte[14];
+        if (!ReadExact(stream, header, 0, 14, ct)) return null;
+        if (header[0] != (byte)'B' || header[1] != (byte)'M') return null;
+
+        int fileSize = BinaryPrimitives.ReadInt32LittleEndian(header.AsSpan(2, 4));
+        if (fileSize < 14 || fileSize > 50_000_000) return null;
+
+        var data = new byte[fileSize];
+        Array.Copy(header, data, 14);
+        if (!ReadExact(stream, data, 14, fileSize - 14, ct)) return null;
+
+        try
+        {
+            using var ms = new MemoryStream(data);
+            var decoder = new BmpBitmapDecoder(ms,
+                BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+            var frame = decoder.Frames[0];
+            frame.Freeze();
+            return frame;
+        }
+        catch { return null; }
+    }
+
+    private static bool ReadExact(Stream stream, byte[] buffer, int offset, int count, CancellationToken ct)
+    {
+        int total = 0;
+        while (total < count)
+        {
+            if (ct.IsCancellationRequested) return false;
+            int got;
+            try { got = stream.Read(buffer, offset + total, count - total); }
+            catch { return false; }
+            if (got <= 0) return false;
+            total += got;
+        }
+        return true;
+    }
+
+    private static string? ResolveFfmpegPath()
+    {
+        var baseDir = AppContext.BaseDirectory;
+        string[] candidates =
+        [
+            Path.Combine(baseDir, "tools", "ffmpeg.exe"),
+            Path.Combine(baseDir, "ffmpeg.exe"),
+        ];
+        foreach (var c in candidates)
+            if (File.Exists(c)) return c;
+        return null;
     }
 
     // Shared MF reader setup: sets stream selection, output type, and reads frame geometry.
     private static bool SetupVideoReader(IMFSourceReader reader,
-        out int width, out int height, out int absStride, out bool bottomUp)
+        out int width, out int height, out int absStride, out bool bottomUp,
+        out double framerate)
     {
         width = height = absStride = 0;
         bottomUp = false;
+        framerate = 0;
 
         reader.SetStreamSelection(AllStreams, false);
         reader.SetStreamSelection(FirstVideoStream, true);
@@ -216,7 +277,8 @@ public static class VideoThumbnailService
 
         reader.GetCurrentMediaType(FirstVideoStream, out var curType);
         curType.GetUINT64(ref _mtFrameSize, out ulong frameSize);
-        int strideHr = curType.GetUINT32(ref _mtDefaultStride, out uint strideRaw);
+        int strideHr   = curType.GetUINT32(ref _mtDefaultStride, out uint strideRaw);
+        int frHr       = curType.GetUINT64(ref _mtFrameRate, out ulong frameRatePacked);
         Marshal.ReleaseComObject(curType);
 
         width    = (int)(frameSize >> 32);
@@ -225,69 +287,14 @@ public static class VideoThumbnailService
         bottomUp = stride < 0;
         absStride = Math.Abs(stride);
 
+        if (frHr == 0)
+        {
+            uint num = (uint)(frameRatePacked >> 32);
+            uint den = (uint)(frameRatePacked & 0xFFFFFFFF);
+            if (num > 0 && den > 0) framerate = num / (double)den;
+        }
+
         return width > 0 && height > 0;
-    }
-
-    private static (bool found, bool eos, BitmapSource? bmp) TryGetBrightFrame(
-        IMFSourceReader reader, int width, int height, int absStride, bool bottomUp, int size)
-    {
-        for (int attempt = 0; attempt < 3; attempt++)
-        {
-            if (reader.ReadSample(FirstVideoStream, 0, out _, out uint sf, out _, out var sample) != 0)
-                return (false, false, null);
-            if ((sf & FlagEos)   != 0) return (false, true,  null);
-            if ((sf & FlagError) != 0) return (false, false, null);
-            if (sample is null) continue;
-
-            try
-            {
-                if (sample.ConvertToContiguousBuffer(out var buf) != 0) continue;
-                try
-                {
-                    if (buf.Lock(out IntPtr data, out _, out uint len) != 0) continue;
-                    try
-                    {
-                        if ((int)len < absStride * height) continue;
-                        if (!IsUsable(data, absStride, width, height)) return (false, false, null);
-
-                        var bmp = CreateBitmap(data, width, height, absStride, bottomUp);
-                        if (bmp is null) continue;
-
-                        if (width > size || height > size)
-                        {
-                            double scale = Math.Min((double)size / width, (double)size / height);
-                            var scaled   = new TransformedBitmap(bmp, new ScaleTransform(scale, scale));
-                            scaled.Freeze();
-                            return (true, false, scaled);
-                        }
-                        bmp.Freeze();
-                        return (true, false, bmp);
-                    }
-                    finally { buf.Unlock(); }
-                }
-                finally { Marshal.ReleaseComObject(buf); }
-            }
-            finally { Marshal.ReleaseComObject(sample); }
-        }
-        return (false, false, null);
-    }
-
-    // Samples the horizontal centre strip; returns false when the frame is mostly black.
-    private static bool IsUsable(IntPtr data, int absStride, int width, int height)
-    {
-        int y           = height / 2;
-        int samplePx    = Math.Min(width, 128);
-        int xOffset     = (width / 2 - samplePx / 2) * 4;
-        var sample      = new byte[samplePx * 4];
-        Marshal.Copy(IntPtr.Add(data, y * absStride + xOffset), sample, 0, sample.Length);
-
-        int total = 0, count = 0;
-        for (int i = 0; i < sample.Length; i += 4)
-        {
-            total += sample[i] + sample[i + 1] + sample[i + 2]; // B+G+R, skip padding byte
-            count += 3;
-        }
-        return count > 0 && (double)total / count > 20.0;
     }
 
     // ── MF source-reader path ─────────────────────────────────────────────────

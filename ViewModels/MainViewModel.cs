@@ -34,7 +34,6 @@ public class MainViewModel : INotifyPropertyChanged
     private bool    _isDetectingDuplicates;
     private CancellationTokenSource? _ocrCts;
     private CancellationTokenSource? _thumbCts;
-    private CancellationTokenSource? _timelineCts;
     private double _timelineValue;
     private bool   _isDeepScanning;
     private double _deepScanProgress;
@@ -240,24 +239,27 @@ public class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private async void SeekTimeline(double seconds)
+    private void SeekTimeline(double seconds)
     {
-        _timelineCts?.Cancel();
-        var cts = new CancellationTokenSource();
-        _timelineCts = cts;
-        var ct     = cts.Token;
-        var record = SelectedFile;
-        if (record is null) return;
+        // Snap to the nearest cached frame in the strip instead of doing a
+        // live MF seek — many recovered files don't seek cleanly, and the
+        // strip already holds frames at every 1-second boundary that the
+        // sequential deep scan was able to decode.
+        if (ThumbnailStrip.Count == 0) return;
 
-        try
+        var target = TimeSpan.FromSeconds(seconds);
+        VideoFrame? closest = null;
+        double      minDiff = double.MaxValue;
+        foreach (var f in ThumbnailStrip)
         {
-            await Task.Delay(150, ct);
-            var bmp = await VideoThumbnailService.GetFrameAtPositionAsync(
-                record.FullPath, TimeSpan.FromSeconds(seconds), 420, ct);
-            if (bmp is not null && SelectedFile?.Id == record.Id)
-                Application.Current.Dispatcher.Invoke(() => PreviewImage = bmp);
+            double diff = Math.Abs((f.Position - target).TotalSeconds);
+            if (diff < minDiff) { minDiff = diff; closest = f; }
         }
-        catch (OperationCanceledException) { }
+
+        if (closest is null) return;
+        PreviewImage = closest.Image;
+        foreach (var f in ThumbnailStrip) f.IsSelected = false;
+        closest.IsSelected = true;
     }
 
     public bool ShowVideoPreview
@@ -1137,8 +1139,6 @@ public class MainViewModel : INotifyPropertyChanged
         PreviewFilePath     = null;
         IsDeepScanning      = false;
         ThumbnailStrip.Clear();
-        _timelineCts?.Cancel();
-        _timelineCts  = null;
         _timelineValue = 0;
         OnPropertyChanged(nameof(TimelineValue));
         OnPropertyChanged(nameof(TimelineLabel));
@@ -1255,23 +1255,28 @@ public class MainViewModel : INotifyPropertyChanged
         DeepScanProgress = 0;
         StatusText       = "Deep scanning...";
         var progress = new Progress<double>(p => DeepScanProgress = p);
+        int added = 0;
         try
         {
-            var (deepThumb, deepPos) = await VideoThumbnailService.ScanDeepAsync(
-                record.FullPath, 420, ct, progress);
+            await VideoThumbnailService.ScanDeepAsync(
+                record.FullPath, 420, ct,
+                (pos, bmp) => Application.Current.Dispatcher.Invoke(() =>
+                {
+                    if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
+
+                    // Insert chronologically; skip if a frame at this exact position already exists.
+                    int idx = 0;
+                    while (idx < ThumbnailStrip.Count && ThumbnailStrip[idx].Position < pos) idx++;
+                    if (idx < ThumbnailStrip.Count && ThumbnailStrip[idx].Position == pos) return;
+                    ThumbnailStrip.Insert(idx, new VideoFrame(bmp, pos));
+                    added++;
+                }),
+                progress);
             if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
 
-            if (deepThumb is not null)
-            {
-                PreviewImage = deepThumb;
-                foreach (var f in ThumbnailStrip) f.IsSelected = false;
-                var deepFrame = new VideoFrame(deepThumb, deepPos) { IsSelected = true };
-                ThumbnailStrip.Add(deepFrame);
-            }
-
-            StatusText = deepThumb is not null
-                ? $"Deep scan complete — best frame at {deepPos:m\\:ss}."
-                : "Deep scan: no better frame found.";
+            StatusText = added > 0
+                ? $"Deep scan complete — {added} frame{(added == 1 ? "" : "s")} added."
+                : "Deep scan: no additional frames found.";
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { StatusText = $"Deep scan failed: {ex.Message}"; }

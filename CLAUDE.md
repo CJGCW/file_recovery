@@ -12,11 +12,33 @@ dotnet run
 dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
 ```
 
-There are no tests and no linting configuration. The project has zero NuGet dependencies beyond the .NET 8 SDK.
+**Always finish a code-change task with a fresh single-file publish** (not just `dotnet build`). The user runs the published exe to verify changes, so producing the exe is part of "done."
+
+There are no tests and no linting configuration. The project requires the .NET 10 SDK.
+
+### Bundled ffmpeg.exe
+
+The video deep-scan path shells out to `tools/ffmpeg.exe` (Media Foundation can't reliably decode many of the recovered containers, e.g. MKV+H264+DTS). The binary is **not** committed to git (~100 MB). To set up after a fresh clone:
+
+```powershell
+# Download the latest Gyan essentials build and extract just ffmpeg.exe
+$rel = Invoke-RestMethod 'https://api.github.com/repos/GyanD/codexffmpeg/releases/latest'
+$url = ($rel.assets | Where-Object name -Like '*essentials_build.zip').browser_download_url
+$zip = Join-Path $env:TEMP 'ffmpeg-essentials.zip'
+Invoke-WebRequest $url -OutFile $zip -UseBasicParsing
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$z = [System.IO.Compression.ZipFile]::OpenRead($zip)
+$entry = $z.Entries | Where-Object FullName -Match 'bin/ffmpeg\.exe$' | Select-Object -First 1
+New-Item -ItemType Directory -Force tools | Out-Null
+[System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, "tools/ffmpeg.exe", $true)
+$z.Dispose()
+```
+
+`FileRecoveryParser.csproj` is set up to copy `tools/ffmpeg.exe` to the publish output (with `ExcludeFromSingleFile=true`, so it sits next to the .exe rather than being embedded).
 
 ## Architecture
 
-This is a **Windows-only WPF desktop app** (.NET 8, `net8.0-windows`) following MVVM. The purpose is cataloguing files recovered from a corrupt drive.
+This is a **Windows-only WPF desktop app** (.NET 10, `net10.0-windows`) following MVVM. The purpose is cataloguing files recovered from a corrupt drive.
 
 **Data flow:**
 1. `Data/ExtensionMap.cs` — static dictionary mapping ~100 file extensions to `(MimeType, FileCategory)` tuples. Files with unrecognised extensions are **skipped** by the scanner (not recorded as Unknown).
