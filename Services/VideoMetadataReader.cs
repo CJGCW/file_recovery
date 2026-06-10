@@ -41,6 +41,14 @@ public static class VideoMetadataReader
     private static readonly Regex YearPattern = new(
         @"^(.+?)[.\s_\-]+\(?\b(19\d{2}|20\d{2})\b\)?", RegexOptions.Compiled);
 
+    // Hard ceiling for the Shell property-store probe. Windows Shell has no
+    // cancellation token and will hang indefinitely on corrupt media headers
+    // (very common for MKV/FLV out of PhotoRec recovery). When the timeout
+    // fires we abandon the Shell thread (it stays blocked but the worker is
+    // released) and proceed with filename-only parsing so the file still
+    // shows up in the grid instead of stalling the entire scan.
+    private static readonly TimeSpan ShellTimeout = TimeSpan.FromSeconds(2);
+
     public static VideoInfo? Read(string filePath)
     {
         TimeSpan? duration    = null;
@@ -49,13 +57,14 @@ public static class VideoMetadataReader
         uint?     frameWidth  = null;
         uint?     frameHeight = null;
 
-        // ── Shell property store ──────────────────────────────────────────────
-        try
+        // ── Shell property store (timeout-protected) ─────────────────────────
+        var shellTask = Task.Run(() =>
         {
-            var iid = typeof(IPropertyStore).GUID;
-            int hr = SHGetPropertyStoreFromParsingName(filePath, IntPtr.Zero, 0, ref iid, out var store);
-            if (hr == 0 && store is not null)
+            try
             {
+                var iid = typeof(IPropertyStore).GUID;
+                int hr = SHGetPropertyStoreFromParsingName(filePath, IntPtr.Zero, 0, ref iid, out var store);
+                if (hr != 0 || store is null) return;
                 try
                 {
                     for (int i = 0; i < Keys.Length; i++)
@@ -87,8 +96,13 @@ public static class VideoMetadataReader
                 }
                 finally { Marshal.ReleaseComObject(store); }
             }
-        }
-        catch { /* shell properties unavailable */ }
+            catch { /* shell properties unavailable */ }
+        });
+
+        // If the Shell hangs, just continue without Shell-derived metadata;
+        // the filename-regex section below still runs and produces something
+        // useful for the suggestion pipeline.
+        try { shellTask.Wait(ShellTimeout); } catch { /* faulted task */ }
 
         // ── Filename parsing ──────────────────────────────────────────────────
         string?  parsedShow    = null;

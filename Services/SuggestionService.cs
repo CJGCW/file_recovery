@@ -1,4 +1,5 @@
 using System.IO;
+using System.Windows.Media.Imaging;
 using FileRecoveryParser.Models;
 
 namespace FileRecoveryParser.Services;
@@ -34,6 +35,105 @@ public class SuggestionService : IDisposable
         file.Category == FileCategory.Image
             ? GetImageSuggestionsAsync(file, ct)
             : Task.FromResult(GetDocumentSuggestions(file));
+
+    // ── Face-tagging API (driven by the image preview UI) ────────────────────
+
+    public record FaceAnalysis(
+        System.Windows.Rect Box,
+        float[]             Embedding,
+        PersonRecord?       MatchedPerson);
+
+    /// <summary>
+    /// Detects every face in <paramref name="filePath"/>, computes the embedding
+    /// for each, and matches against the persistent PersonStore. Used by the
+    /// image-preview face overlay so the user can name each face directly.
+    /// Lazily initialises the ONNX face models on first call.
+    /// </summary>
+    public async Task<IList<FaceAnalysis>> AnalyzeFacesAsync(
+        string filePath, CancellationToken ct, Action<string>? status = null)
+    {
+        status ??= _ => { };
+
+        if (!_modelsReady)
+        {
+            try { await EnsureReadyAsync(status, ct); }
+            catch (Exception ex)
+            {
+                status($"Face model load failed: {ex.Message}");
+                return [];
+            }
+        }
+
+        if (_faceService is null)
+        {
+            status("Face service unavailable (model not loaded).");
+            return [];
+        }
+
+        return await Task.Run<IList<FaceAnalysis>>(() =>
+        {
+            try
+            {
+                var faces  = _faceService.DetectFaces(filePath);
+                var output = new List<FaceAnalysis>(faces.Count);
+                foreach (var f in faces)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var emb   = _faceService.GetEmbedding(filePath, f);
+                    var match = _store.Match(emb);
+                    output.Add(new FaceAnalysis(f.Box, emb, match?.Person));
+                }
+                return output;
+            }
+            catch (Exception ex)
+            {
+                status($"Face detection failed: {ex.Message}");
+                return [];
+            }
+        }, ct);
+    }
+
+    /// <summary>
+    /// Computes a MobileFaceNet embedding from an already-cropped bitmap.
+    /// Used by the manual region-tagging flow (where no face detection has
+    /// run) and by per-crop scan matching.
+    /// </summary>
+    public async Task<float[]?> GetEmbeddingFromCropAsync(
+        BitmapSource crop, CancellationToken ct, Action<string>? status = null)
+    {
+        status ??= _ => { };
+        if (!_modelsReady)
+        {
+            try { await EnsureReadyAsync(status, ct); }
+            catch { return null; }
+        }
+        if (_faceService is null) return null;
+
+        return await Task.Run<float[]?>(() =>
+        {
+            try { return _faceService.GetEmbeddingFromBitmap(crop); }
+            catch { return null; }
+        }, ct);
+    }
+
+    public float[]? GetEmbeddingFromCrop(BitmapSource crop)
+    {
+        if (_faceService is null) return null;
+        try { return _faceService.GetEmbeddingFromBitmap(crop); }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Assigns a name to the face whose embedding most closely matches the
+    /// supplied one. Creates a new PersonRecord if no existing person matches.
+    /// </summary>
+    public PersonRecord NameFace(float[] embedding, string name)
+    {
+        var match  = _store.Match(embedding);
+        var person = match?.Person ?? _store.CreatePerson(embedding);
+        _store.SetPersonName(person, name);
+        return person;
+    }
 
     // ── Image suggestions (face recognition) ─────────────────────────────────
 

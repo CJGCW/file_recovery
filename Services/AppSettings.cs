@@ -12,6 +12,14 @@ public class AppSettings
     public string? GoogleVisionKey { get; set; }
     public string? TmdbKey         { get; set; }
 
+    /// <summary>Persisted state of the "Auto-apply matches" checkbox on the Scan-for-tags action bar.</summary>
+    public bool AutoApplyScanResults { get; set; }
+
+    /// <summary>Comma-separated folder names to skip during folder scan. Matched
+    /// against each directory's name (case-insensitive). Default "rec" so newly
+    /// created recovery-output folders don't get scanned automatically.</summary>
+    public string ExcludedFolderNames { get; set; } = "rec";
+
     public static AppSettings Load()
     {
         try

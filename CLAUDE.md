@@ -16,12 +16,12 @@ dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=
 
 There are no tests and no linting configuration. The project requires the .NET 10 SDK.
 
-### Bundled ffmpeg.exe
+### Bundled external binaries
 
-The video deep-scan path shells out to `tools/ffmpeg.exe` (Media Foundation can't reliably decode many of the recovered containers, e.g. MKV+H264+DTS). The binary is **not** committed to git (~100 MB). To set up after a fresh clone:
+Bundled alongside the .exe in `tools/` (gitignored, ~115 MB total). The csproj copies them into the publish output with `ExcludeFromSingleFile=true`. Fetch them once after a fresh clone:
 
 ```powershell
-# Download the latest Gyan essentials build and extract just ffmpeg.exe
+# ── ffmpeg.exe (Gyan essentials build) — required for deep scan & metadata ──
 $rel = Invoke-RestMethod 'https://api.github.com/repos/GyanD/codexffmpeg/releases/latest'
 $url = ($rel.assets | Where-Object name -Like '*essentials_build.zip').browser_download_url
 $zip = Join-Path $env:TEMP 'ffmpeg-essentials.zip'
@@ -32,9 +32,12 @@ $entry = $z.Entries | Where-Object FullName -Match 'bin/ffmpeg\.exe$' | Select-O
 New-Item -ItemType Directory -Force tools | Out-Null
 [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, "tools/ffmpeg.exe", $true)
 $z.Dispose()
-```
 
-`FileRecoveryParser.csproj` is set up to copy `tools/ffmpeg.exe` to the publish output (with `ExcludeFromSingleFile=true`, so it sits next to the .exe rather than being embedded).
+# ── eng.traineddata (Tesseract OCR best-quality model) — required for Tesseract pass ──
+New-Item -ItemType Directory -Force 'tools/tessdata' | Out-Null
+Invoke-WebRequest 'https://github.com/tesseract-ocr/tessdata_best/raw/main/eng.traineddata' `
+    -OutFile 'tools/tessdata/eng.traineddata' -UseBasicParsing
+```
 
 ## Architecture
 

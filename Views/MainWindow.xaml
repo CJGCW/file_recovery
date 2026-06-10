@@ -15,6 +15,7 @@
     <cv:CategoryColorConverter         x:Key="CategoryColorConverter"/>
     <cv:BoolToVisibilityConverter      x:Key="BoolToVis"/>
     <cv:InverseBoolToVisibilityConverter x:Key="InvBoolToVis"/>
+    <cv:InverseBoolConverter           x:Key="InverseBool"/>
     <cv:SortIndicatorConverter         x:Key="SortIndicator"/>
     <cv:DateConverter                  x:Key="DateConverter"/>
     <cv:DurationConverter              x:Key="DurationConverter"/>
@@ -91,14 +92,15 @@
 
   <Grid>
     <Grid.RowDefinitions>
-      <RowDefinition Height="56"/>   <!-- title bar -->
+      <RowDefinition Height="Auto"/> <!-- title bar (collapses when preview maximized) -->
       <RowDefinition Height="*"/>    <!-- content -->
-      <RowDefinition Height="28"/>   <!-- status bar -->
+      <RowDefinition Height="Auto"/> <!-- status bar (collapses when preview maximized) -->
     </Grid.RowDefinitions>
 
     <!-- ═══════════════════ TITLE BAR ═══════════════════ -->
-    <Border Grid.Row="0" Background="{StaticResource BgPanel}"
-            BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1">
+    <Border Grid.Row="0" Height="56" Background="{StaticResource BgPanel}"
+            BorderBrush="{StaticResource Border}" BorderThickness="0,0,0,1"
+            Visibility="{Binding IsPreviewMaximized, Converter={StaticResource InvBoolToVis}}">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="20,0">
         <TextBlock Text="⟳" FontSize="20" Foreground="{StaticResource Accent}" Margin="0,0,10,0"/>
         <TextBlock Text="File Recovery Parser" FontSize="16" FontWeight="SemiBold"/>
@@ -117,7 +119,8 @@
 
       <!-- ─── LEFT SIDEBAR ─────────────────────────────────── -->
       <Border Grid.Column="0" Background="{StaticResource BgPanel}"
-              BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
+              BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0"
+              Visibility="{Binding IsPreviewMaximized, Converter={StaticResource InvBoolToVis}}">
         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
           <StackPanel Margin="14,16,14,16">
 
@@ -138,10 +141,91 @@
                       Click="BrowseFolder_Click" ToolTip="Browse for folder"/>
             </Grid>
 
-            <Button Content="Scan Folder" Margin="0,10,0,0" Height="36"
-                    Style="{StaticResource PrimaryButton}"
-                    Command="{Binding ScanCommand}"
-                    CommandParameter="{Binding FolderPath}"/>
+            <!-- Excluded folder names — comma-separated, matched by name (case-insensitive) -->
+            <TextBlock Text="EXCLUDE FOLDERS" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{StaticResource TextSecondary}" Margin="0,12,0,8"/>
+            <TextBox Text="{Binding ExcludedFolderNames, UpdateSourceTrigger=PropertyChanged}"
+                     ToolTip="Comma-separated folder names to skip during scan (matched by name, case-insensitive). Default: rec"/>
+
+            <!-- Delete mode pill toggle. Turns the Scan button below into a bulk-delete button. -->
+            <CheckBox Margin="0,10,0,0"
+                      IsChecked="{Binding IsDeleteMode}"
+                      Cursor="Hand" Focusable="False"
+                      ToolTip="Bulk-delete mode. Check the extensions to remove, then click the Delete button.">
+              <CheckBox.Template>
+                <ControlTemplate TargetType="CheckBox">
+                  <StackPanel Orientation="Horizontal" Background="Transparent">
+                    <Border x:Name="Track" Width="40" Height="22" CornerRadius="11"
+                            Background="#3A3A5C" VerticalAlignment="Center">
+                      <Border x:Name="Thumb" Width="16" Height="16" CornerRadius="8"
+                              Background="White"
+                              HorizontalAlignment="Left" VerticalAlignment="Center"
+                              Margin="3,0,0,0"/>
+                    </Border>
+                    <TextBlock x:Name="Label" Text="Delete mode"
+                               VerticalAlignment="Center" Margin="10,0,0,0"
+                               FontSize="12" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextSecondary}"/>
+                  </StackPanel>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsChecked" Value="True">
+                      <Setter TargetName="Track" Property="Background"          Value="#E06C6C"/>
+                      <Setter TargetName="Thumb" Property="HorizontalAlignment" Value="Right"/>
+                      <Setter TargetName="Thumb" Property="Margin"              Value="0,0,3,0"/>
+                      <Setter TargetName="Label" Property="Foreground"          Value="#E06C6C"/>
+                    </Trigger>
+                    <Trigger Property="IsMouseOver" Value="True">
+                      <Setter TargetName="Track" Property="Opacity" Value="0.9"/>
+                    </Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </CheckBox.Template>
+            </CheckBox>
+
+            <Button Margin="0,8,0,0" Height="36" CommandParameter="{Binding FolderPath}">
+              <Button.Style>
+                <Style TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
+                  <Setter Property="Content" Value="Scan Folder"/>
+                  <Setter Property="Command" Value="{Binding ScanCommand}"/>
+                  <Style.Triggers>
+                    <DataTrigger Binding="{Binding IsDeleteMode}" Value="True">
+                      <Setter Property="Content"    Value="Delete from folder…"/>
+                      <Setter Property="Command"    Value="{Binding DeleteByExtensionsCommand}"/>
+                      <Setter Property="Background" Value="#E06C6C"/>
+                    </DataTrigger>
+                  </Style.Triggers>
+                </Style>
+              </Button.Style>
+            </Button>
+
+            <!-- Bulk-delete progress (visible only while a delete batch is running) -->
+            <Border Margin="0,8,0,0" Padding="10,8" CornerRadius="6"
+                    Background="#220D0D1A"
+                    Visibility="{Binding IsDeleting, Converter={StaticResource BoolToVis}}">
+              <StackPanel>
+                <Grid Margin="0,0,0,6">
+                  <TextBlock Text="Deleting…" FontSize="11"
+                             Foreground="{StaticResource TextSecondary}"
+                             HorizontalAlignment="Left"/>
+                  <TextBlock HorizontalAlignment="Right" FontSize="11" Foreground="#E06C6C">
+                    <Run Text="{Binding DeleteProgress, Mode=OneWay, StringFormat={}{0:F0}}"/>
+                    <Run Text="%"/>
+                  </TextBlock>
+                </Grid>
+                <ProgressBar Value="{Binding DeleteProgress, Mode=OneWay}" Minimum="0" Maximum="100"
+                             Height="5" BorderThickness="0">
+                  <ProgressBar.Template>
+                    <ControlTemplate TargetType="ProgressBar">
+                      <Border Background="#33FFFFFF" CornerRadius="3" ClipToBounds="True">
+                        <Border x:Name="PART_Indicator" HorizontalAlignment="Left"
+                                Background="#E06C6C" CornerRadius="3"/>
+                      </Border>
+                    </ControlTemplate>
+                  </ProgressBar.Template>
+                </ProgressBar>
+              </StackPanel>
+            </Border>
+
             <Button Content="Cancel" Margin="0,6,0,0" Height="32"
                     Style="{StaticResource SecondaryButton}"
                     Command="{Binding CancelCommand}"
@@ -315,8 +399,36 @@
             <!-- ▼ FILE TYPES -->
             <Expander IsExpanded="True">
               <Expander.Header>
-                <TextBlock Text="FILE TYPES" FontSize="10" FontWeight="SemiBold"
-                           Foreground="{StaticResource TextSecondary}"/>
+                <Grid HorizontalAlignment="Stretch">
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Grid.Column="0" Text="FILE TYPES" FontSize="10" FontWeight="SemiBold"
+                             Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                  <!-- Master select-all / deselect-all. Label flips based on
+                       whether any extension is currently unchecked so the
+                       single button covers both directions. -->
+                  <Button Grid.Column="1"
+                          Command="{Binding ToggleAllFileTypesCommand}"
+                          Background="Transparent" BorderThickness="0"
+                          Padding="6,0" Cursor="Hand" Focusable="False"
+                          ToolTip="Toggle every extension in every category on or off">
+                    <TextBlock FontSize="10" FontWeight="SemiBold"
+                               Foreground="{StaticResource Accent}">
+                      <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                          <Setter Property="Text" Value="Deselect all"/>
+                          <Style.Triggers>
+                            <DataTrigger Binding="{Binding HasUncheckedFileType}" Value="True">
+                              <Setter Property="Text" Value="Select all"/>
+                            </DataTrigger>
+                          </Style.Triggers>
+                        </Style>
+                      </TextBlock.Style>
+                    </TextBlock>
+                  </Button>
+                </Grid>
               </Expander.Header>
               <ItemsControl ItemsSource="{Binding FileTypeGroups}" Margin="0,6,0,0">
                 <ItemsControl.ItemTemplate>
@@ -357,7 +469,7 @@
                           </ToggleButton.Template>
                         </ToggleButton>
 
-                        <!-- Master tri-state checkbox -->
+                        <!-- Master tri-state checkbox. -->
                         <CheckBox Grid.Column="1" IsThreeState="True"
                                   IsChecked="{Binding IsAllChecked}"
                                   VerticalAlignment="Center"/>
@@ -434,10 +546,12 @@
       </Border>
 
       <GridSplitter Grid.Column="1" Width="4" HorizontalAlignment="Stretch"
-                    Background="{StaticResource Border}" Cursor="SizeWE"/>
+                    Background="{StaticResource Border}" Cursor="SizeWE"
+                    Visibility="{Binding IsPreviewMaximized, Converter={StaticResource InvBoolToVis}}"/>
 
       <!-- ─── FILE LIST ─────────────────────────────────────── -->
-      <Grid Grid.Column="2">
+      <Grid Grid.Column="2"
+            Visibility="{Binding IsPreviewMaximized, Converter={StaticResource InvBoolToVis}}">
         <Grid.RowDefinitions>
           <RowDefinition Height="36"/>  <!-- results count bar -->
           <RowDefinition Height="36"/>  <!-- action bar -->
@@ -485,7 +599,36 @@
                       Command="{Binding MoveCommand}" Margin="0,0,6,0"/>
               <Button Content="Delete" Height="26" Padding="10,0"
                       Style="{StaticResource DangerButton}"
-                      Command="{Binding DeleteCommand}"/>
+                      Command="{Binding DeleteCommand}"
+                      Margin="0,0,12,0"/>
+
+              <!-- Scan for tags + auto-apply checkbox -->
+              <CheckBox Content="Auto-apply matches"
+                        VerticalAlignment="Center"
+                        Margin="0,0,8,0"
+                        IsChecked="{Binding AutoApplyScanResults}"
+                        ToolTip="When checked, every match crossing the threshold is added to the file's tag list during the scan."/>
+              <Button Content="Scan for tags" Height="26" Padding="10,0"
+                      Command="{Binding ScanForTagsCommand}"
+                      Style="{StaticResource PrimaryButton}"
+                      ToolTip="{Binding ScanForTagsDisabledReason}"
+                      Margin="0,0,6,0"/>
+              <Button Content="Manage tags…" Height="26" Padding="10,0"
+                      Command="{Binding ManageTagsCommand}"
+                      Style="{StaticResource SecondaryButton}"
+                      Margin="0,0,6,0"
+                      ToolTip="Open the tag manager to view, rename, or delete stored frame tags."/>
+              <Button Content="View scan results…" Height="26" Padding="10,0"
+                      Command="{Binding OpenScanResultsCommand}"
+                      Style="{StaticResource SecondaryButton}"
+                      Margin="0,0,6,0"
+                      ToolTip="Reopen the results window from the most recent scan-for-tags run. Results are kept until the next scan starts."/>
+              <!-- Clear sort: hides itself when nothing is sorted so the toolbar isn't cluttered. -->
+              <Button Content="Clear sort" Height="26" Padding="10,0"
+                      Command="{Binding ClearSortCommand}"
+                      Style="{StaticResource SecondaryButton}"
+                      Visibility="{Binding IsSorted, Converter={StaticResource BoolToVis}}"
+                      ToolTip="Remove the current column-header sort and return the grid to its natural (insertion) order."/>
             </StackPanel>
           </Grid>
         </Border>
@@ -517,6 +660,8 @@
 
           <DataGrid.ContextMenu>
             <ContextMenu>
+              <MenuItem Header="Open file location" Command="{Binding OpenLocationCommand}"/>
+              <Separator Style="{StaticResource MenuSeparatorStyle}"/>
               <MenuItem Header="Rename…"  Command="{Binding RenameCommand}"/>
               <MenuItem Header="Move to…" Command="{Binding MoveCommand}"/>
               <Separator Style="{StaticResource MenuSeparatorStyle}"/>
@@ -565,9 +710,7 @@
                 <DataTemplate>
                   <CheckBox IsThreeState="True" HorizontalAlignment="Center"
                             IsChecked="{Binding DataContext.AllSelected, Mode=TwoWay,
-                                        RelativeSource={RelativeSource AncestorType=DataGrid}}"
-                            Command="{Binding DataContext.SelectAllCommand,
-                                     RelativeSource={RelativeSource AncestorType=DataGrid}}"/>
+                                        RelativeSource={RelativeSource AncestorType=DataGrid}}"/>
                 </DataTemplate>
               </DataGridTemplateColumn.HeaderTemplate>
               <DataGridTemplateColumn.CellTemplate>
@@ -636,23 +779,84 @@
             <DataGridTemplateColumn Width="90" MinWidth="80">
               <DataGridTemplateColumn.HeaderTemplate>
                 <DataTemplate>
-                  <Button Style="{StaticResource SecondaryButton}" BorderThickness="0"
-                          Background="Transparent" Padding="0"
-                          Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
-                          CommandParameter="Category">
-                    <StackPanel Orientation="Horizontal">
-                      <TextBlock Text="Type" FontSize="11" FontWeight="SemiBold"
-                                 Foreground="{StaticResource TextSecondary}"/>
-                      <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
-                        <TextBlock.Text>
-                          <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="Category">
-                            <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
-                            <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
-                          </MultiBinding>
-                        </TextBlock.Text>
-                      </TextBlock>
-                    </StackPanel>
-                  </Button>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Button Grid.Column="0" Style="{StaticResource SecondaryButton}" BorderThickness="0"
+                            Background="Transparent" Padding="0"
+                            Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                            CommandParameter="Category">
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Type" FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextSecondary}"/>
+                        <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
+                          <TextBlock.Text>
+                            <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="Category">
+                              <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                              <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                            </MultiBinding>
+                          </TextBlock.Text>
+                        </TextBlock>
+                      </StackPanel>
+                    </Button>
+                    <ToggleButton Grid.Column="1" x:Name="CategoryFilterToggle"
+                                  Style="{StaticResource ColumnFilterToggle}"
+                                  Focusable="False"
+                                  Tag="Category"
+                                  ToolTip="Filter by file type">
+                      <TextBlock Text="▾" FontSize="10"
+                                 Foreground="{Binding DataContext.CategoryColumnFilter.IsActive, RelativeSource={RelativeSource AncestorType=DataGrid}, Converter={StaticResource FilterActiveColor}}"/>
+                    </ToggleButton>
+                    <Popup IsOpen="{Binding ElementName=CategoryFilterToggle, Path=IsChecked, Mode=TwoWay}"
+                           PlacementTarget="{Binding ElementName=CategoryFilterToggle}"
+                           Placement="Bottom" StaysOpen="False" AllowsTransparency="True"
+                           DataContext="{Binding DataContext, RelativeSource={RelativeSource AncestorType=DataGrid}}">
+                      <Border Background="{StaticResource BgPanel}" BorderBrush="{StaticResource Border}"
+                              BorderThickness="1" CornerRadius="6" Padding="10" Width="240">
+                        <Border.Effect>
+                          <DropShadowEffect BlurRadius="14" ShadowDepth="3" Opacity="0.45" Color="Black"/>
+                        </Border.Effect>
+                        <StackPanel>
+                          <Grid Margin="0,0,0,6">
+                            <Grid.ColumnDefinitions>
+                              <ColumnDefinition Width="*"/>
+                              <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Filter values" FontSize="11" FontWeight="SemiBold"
+                                       Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                              <Button Content="Select all" FontSize="10" Padding="0" Cursor="Hand"
+                                      Background="Transparent" BorderThickness="0"
+                                      Foreground="{StaticResource Accent}"
+                                      Command="{Binding SelectAllColumnValuesCommand}" CommandParameter="Category"/>
+                              <TextBlock Text="|" Margin="6,0" Foreground="{StaticResource Border}" VerticalAlignment="Center"/>
+                              <Button Content="Deselect all" FontSize="10" Padding="0" Cursor="Hand"
+                                      Background="Transparent" BorderThickness="0"
+                                      Foreground="{StaticResource Accent}"
+                                      Command="{Binding DeselectAllColumnValuesCommand}" CommandParameter="Category"/>
+                            </StackPanel>
+                          </Grid>
+                          <ScrollViewer MaxHeight="280" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding CategoryColumnFilter.Values}">
+                              <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                  <CheckBox Content="{Binding Display}" IsChecked="{Binding IsChecked, Mode=TwoWay}" Margin="0,2"/>
+                                </DataTemplate>
+                              </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                          </ScrollViewer>
+                          <StackPanel Orientation="Horizontal" Margin="0,10,0,0" HorizontalAlignment="Right">
+                            <Button Content="Clear" Style="{StaticResource SecondaryButton}" Padding="10,4" Margin="0,0,6,0"
+                                    Command="{Binding ClearColumnFilterCommand}" CommandParameter="Category"/>
+                            <Button Content="Apply" Style="{StaticResource PrimaryButton}" Padding="10,4"
+                                    Command="{Binding ApplyColumnFilterCommand}" CommandParameter="Category"/>
+                          </StackPanel>
+                        </StackPanel>
+                      </Border>
+                    </Popup>
+                  </Grid>
                 </DataTemplate>
               </DataGridTemplateColumn.HeaderTemplate>
               <DataGridTemplateColumn.CellTemplate>
@@ -670,23 +874,84 @@
             <DataGridTemplateColumn Width="70" MinWidth="60">
               <DataGridTemplateColumn.HeaderTemplate>
                 <DataTemplate>
-                  <Button Style="{StaticResource SecondaryButton}" BorderThickness="0"
-                          Background="Transparent" Padding="0"
-                          Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
-                          CommandParameter="Extension">
-                    <StackPanel Orientation="Horizontal">
-                      <TextBlock Text="Ext" FontSize="11" FontWeight="SemiBold"
-                                 Foreground="{StaticResource TextSecondary}"/>
-                      <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
-                        <TextBlock.Text>
-                          <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="Extension">
-                            <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
-                            <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
-                          </MultiBinding>
-                        </TextBlock.Text>
-                      </TextBlock>
-                    </StackPanel>
-                  </Button>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Button Grid.Column="0" Style="{StaticResource SecondaryButton}" BorderThickness="0"
+                            Background="Transparent" Padding="0"
+                            Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                            CommandParameter="Extension">
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Ext" FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextSecondary}"/>
+                        <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
+                          <TextBlock.Text>
+                            <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="Extension">
+                              <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                              <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                            </MultiBinding>
+                          </TextBlock.Text>
+                        </TextBlock>
+                      </StackPanel>
+                    </Button>
+                    <ToggleButton Grid.Column="1" x:Name="ExtFilterToggle"
+                                  Style="{StaticResource ColumnFilterToggle}"
+                                  Focusable="False"
+                                  Tag="Extension"
+                                  ToolTip="Filter by extension">
+                      <TextBlock Text="▾" FontSize="10"
+                                 Foreground="{Binding DataContext.ExtColumnFilter.IsActive, RelativeSource={RelativeSource AncestorType=DataGrid}, Converter={StaticResource FilterActiveColor}}"/>
+                    </ToggleButton>
+                    <Popup IsOpen="{Binding ElementName=ExtFilterToggle, Path=IsChecked, Mode=TwoWay}"
+                           PlacementTarget="{Binding ElementName=ExtFilterToggle}"
+                           Placement="Bottom" StaysOpen="False" AllowsTransparency="True"
+                           DataContext="{Binding DataContext, RelativeSource={RelativeSource AncestorType=DataGrid}}">
+                      <Border Background="{StaticResource BgPanel}" BorderBrush="{StaticResource Border}"
+                              BorderThickness="1" CornerRadius="6" Padding="10" Width="240">
+                        <Border.Effect>
+                          <DropShadowEffect BlurRadius="14" ShadowDepth="3" Opacity="0.45" Color="Black"/>
+                        </Border.Effect>
+                        <StackPanel>
+                          <Grid Margin="0,0,0,6">
+                            <Grid.ColumnDefinitions>
+                              <ColumnDefinition Width="*"/>
+                              <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Filter values" FontSize="11" FontWeight="SemiBold"
+                                       Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                              <Button Content="Select all" FontSize="10" Padding="0" Cursor="Hand"
+                                      Background="Transparent" BorderThickness="0"
+                                      Foreground="{StaticResource Accent}"
+                                      Command="{Binding SelectAllColumnValuesCommand}" CommandParameter="Extension"/>
+                              <TextBlock Text="|" Margin="6,0" Foreground="{StaticResource Border}" VerticalAlignment="Center"/>
+                              <Button Content="Deselect all" FontSize="10" Padding="0" Cursor="Hand"
+                                      Background="Transparent" BorderThickness="0"
+                                      Foreground="{StaticResource Accent}"
+                                      Command="{Binding DeselectAllColumnValuesCommand}" CommandParameter="Extension"/>
+                            </StackPanel>
+                          </Grid>
+                          <ScrollViewer MaxHeight="280" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding ExtColumnFilter.Values}">
+                              <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                  <CheckBox Content="{Binding Display}" IsChecked="{Binding IsChecked, Mode=TwoWay}" Margin="0,2"/>
+                                </DataTemplate>
+                              </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                          </ScrollViewer>
+                          <StackPanel Orientation="Horizontal" Margin="0,10,0,0" HorizontalAlignment="Right">
+                            <Button Content="Clear" Style="{StaticResource SecondaryButton}" Padding="10,4" Margin="0,0,6,0"
+                                    Command="{Binding ClearColumnFilterCommand}" CommandParameter="Extension"/>
+                            <Button Content="Apply" Style="{StaticResource PrimaryButton}" Padding="10,4"
+                                    Command="{Binding ApplyColumnFilterCommand}" CommandParameter="Extension"/>
+                          </StackPanel>
+                        </StackPanel>
+                      </Border>
+                    </Popup>
+                  </Grid>
                 </DataTemplate>
               </DataGridTemplateColumn.HeaderTemplate>
               <DataGridTemplateColumn.CellTemplate>
@@ -751,8 +1016,84 @@
             <DataGridTemplateColumn Width="160" MinWidth="80">
               <DataGridTemplateColumn.HeaderTemplate>
                 <DataTemplate>
-                  <TextBlock Text="Tags" FontSize="11" FontWeight="SemiBold"
-                             Foreground="{StaticResource TextSecondary}" Padding="8,6"/>
+                  <Grid>
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="*"/>
+                      <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <Button Grid.Column="0" Style="{StaticResource SecondaryButton}" BorderThickness="0"
+                            Background="Transparent" Padding="0"
+                            Command="{Binding DataContext.SortCommand, RelativeSource={RelativeSource AncestorType=DataGrid}}"
+                            CommandParameter="TagsSortKey">
+                      <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="Tags" FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextSecondary}"/>
+                        <TextBlock FontSize="11" Foreground="{StaticResource Accent}">
+                          <TextBlock.Text>
+                            <MultiBinding Converter="{StaticResource SortIndicator}" ConverterParameter="TagsSortKey">
+                              <Binding Path="DataContext.SortColumn"    RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                              <Binding Path="DataContext.SortDirection" RelativeSource="{RelativeSource AncestorType=DataGrid}"/>
+                            </MultiBinding>
+                          </TextBlock.Text>
+                        </TextBlock>
+                      </StackPanel>
+                    </Button>
+                    <ToggleButton Grid.Column="1" x:Name="TagsFilterToggle"
+                                  Style="{StaticResource ColumnFilterToggle}"
+                                  Focusable="False"
+                                  Tag="Tags"
+                                  ToolTip="Filter by tag">
+                      <TextBlock Text="▾" FontSize="10"
+                                 Foreground="{Binding DataContext.TagsColumnFilter.IsActive, RelativeSource={RelativeSource AncestorType=DataGrid}, Converter={StaticResource FilterActiveColor}}"/>
+                    </ToggleButton>
+                    <Popup IsOpen="{Binding ElementName=TagsFilterToggle, Path=IsChecked, Mode=TwoWay}"
+                           PlacementTarget="{Binding ElementName=TagsFilterToggle}"
+                           Placement="Bottom" StaysOpen="False" AllowsTransparency="True"
+                           DataContext="{Binding DataContext, RelativeSource={RelativeSource AncestorType=DataGrid}}">
+                      <Border Background="{StaticResource BgPanel}" BorderBrush="{StaticResource Border}"
+                              BorderThickness="1" CornerRadius="6" Padding="10" Width="240">
+                        <Border.Effect>
+                          <DropShadowEffect BlurRadius="14" ShadowDepth="3" Opacity="0.45" Color="Black"/>
+                        </Border.Effect>
+                        <StackPanel>
+                          <Grid Margin="0,0,0,6">
+                            <Grid.ColumnDefinitions>
+                              <ColumnDefinition Width="*"/>
+                              <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Filter values" FontSize="11" FontWeight="SemiBold"
+                                       Foreground="{StaticResource TextSecondary}" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                              <Button Content="Select all" FontSize="10" Padding="0" Cursor="Hand"
+                                      Background="Transparent" BorderThickness="0"
+                                      Foreground="{StaticResource Accent}"
+                                      Command="{Binding SelectAllColumnValuesCommand}" CommandParameter="Tags"/>
+                              <TextBlock Text="|" Margin="6,0" Foreground="{StaticResource Border}" VerticalAlignment="Center"/>
+                              <Button Content="Deselect all" FontSize="10" Padding="0" Cursor="Hand"
+                                      Background="Transparent" BorderThickness="0"
+                                      Foreground="{StaticResource Accent}"
+                                      Command="{Binding DeselectAllColumnValuesCommand}" CommandParameter="Tags"/>
+                            </StackPanel>
+                          </Grid>
+                          <ScrollViewer MaxHeight="280" VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding TagsColumnFilter.Values}">
+                              <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                  <CheckBox Content="{Binding Display}" IsChecked="{Binding IsChecked, Mode=TwoWay}" Margin="0,2"/>
+                                </DataTemplate>
+                              </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                          </ScrollViewer>
+                          <StackPanel Orientation="Horizontal" Margin="0,10,0,0" HorizontalAlignment="Right">
+                            <Button Content="Clear" Style="{StaticResource SecondaryButton}" Padding="10,4" Margin="0,0,6,0"
+                                    Command="{Binding ClearColumnFilterCommand}" CommandParameter="Tags"/>
+                            <Button Content="Apply" Style="{StaticResource PrimaryButton}" Padding="10,4"
+                                    Command="{Binding ApplyColumnFilterCommand}" CommandParameter="Tags"/>
+                          </StackPanel>
+                        </StackPanel>
+                      </Border>
+                    </Popup>
+                  </Grid>
                 </DataTemplate>
               </DataGridTemplateColumn.HeaderTemplate>
               <DataGridTemplateColumn.CellTemplate>
@@ -843,7 +1184,8 @@
       </Grid>
 
       <GridSplitter Grid.Column="3" Width="4" HorizontalAlignment="Stretch"
-                    Background="{StaticResource Border}" Cursor="SizeWE"/>
+                    Background="{StaticResource Border}" Cursor="SizeWE"
+                    Visibility="{Binding IsPreviewMaximized, Converter={StaticResource InvBoolToVis}}"/>
 
       <!-- ─── PREVIEW PANEL ─────────────────────────────────── -->
       <Border Background="{StaticResource BgPanel}"
@@ -918,12 +1260,88 @@
                   Background="{StaticResource BgMid}"
                   Visibility="{Binding ShowAnyPreview, Converter={StaticResource BoolToVis}}">
             <Grid>
-              <Image Source="{Binding PreviewImage}"
-                     Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"
-                     Margin="8"
-                     Visibility="{Binding ShowMediaPreview, Converter={StaticResource BoolToVis}}"/>
+              <!-- Image + face overlay scale together via the Viewbox -->
+              <Viewbox Stretch="Uniform" Margin="8"
+                       Visibility="{Binding ShowMediaPreview, Converter={StaticResource BoolToVis}}">
+                <Grid Width="{Binding PreviewImagePixelWidth}"
+                      Height="{Binding PreviewImagePixelHeight}">
+                  <Image Source="{Binding PreviewImage}"
+                         Stretch="Fill" RenderOptions.BitmapScalingMode="HighQuality"/>
+
+                  <!-- Manual region selection layer (drag to draw, right-click box to tag).
+                       Background=Transparent so it catches mouse on empty image areas
+                       (face boxes above this still receive their own clicks). -->
+                  <Canvas x:Name="ManualRegionLayer" Background="Transparent"
+                          Visibility="{Binding ShowImagePreview, Converter={StaticResource BoolToVis}}"
+                          MouseLeftButtonDown="ManualRegion_MouseDown"
+                          MouseMove="ManualRegion_MouseMove"
+                          MouseLeftButtonUp="ManualRegion_MouseUp"/>
+
+                  <!-- Detected face boxes — only visible for images -->
+                  <ItemsControl ItemsSource="{Binding DetectedFaces}"
+                                Visibility="{Binding ShowImagePreview, Converter={StaticResource BoolToVis}}">
+                    <ItemsControl.ItemsPanel>
+                      <ItemsPanelTemplate>
+                        <Canvas/>
+                      </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemContainerStyle>
+                      <Style TargetType="ContentPresenter">
+                        <Setter Property="Canvas.Left" Value="{Binding X}"/>
+                        <Setter Property="Canvas.Top"  Value="{Binding Y}"/>
+                      </Style>
+                    </ItemsControl.ItemContainerStyle>
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate>
+                        <Grid Width="{Binding Width}" Height="{Binding Height}">
+                          <Border BorderBrush="{StaticResource Accent}"
+                                  BorderThickness="3" CornerRadius="4"
+                                  Background="#22FFFFFF" Cursor="Hand"
+                                  Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}">
+                            <Border.ContextMenu>
+                              <ContextMenu>
+                                <MenuItem Header="Tag face…"
+                                          Command="{Binding PlacementTarget.Tag.TagFaceCommand,
+                                                    RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          CommandParameter="{Binding PlacementTarget.DataContext,
+                                                              RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                              </ContextMenu>
+                            </Border.ContextMenu>
+                          </Border>
+                          <!-- Name label, only shown when present -->
+                          <Border VerticalAlignment="Bottom" HorizontalAlignment="Left"
+                                  Padding="6,2" Margin="0,0,0,-2"
+                                  Background="{StaticResource Accent}" CornerRadius="3"
+                                  IsHitTestVisible="False"
+                                  Visibility="{Binding HasName, Converter={StaticResource BoolToVis}}">
+                            <TextBlock Text="{Binding DisplayName}" FontSize="14"
+                                       Foreground="White" FontWeight="SemiBold"/>
+                          </Border>
+                        </Grid>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </Grid>
+              </Viewbox>
               <svc:PreviewHandlerHost FilePath="{Binding PreviewFilePath}"
                      Visibility="{Binding ShowDocumentPreview, Converter={StaticResource BoolToVis}}"/>
+              <!-- Inline plain-text preview for .txt and other text-like
+                   extensions. The Shell preview-handler path is fragile on
+                   these (often missing or 32-bit), so we just read the file
+                   and display it directly. Read-only TextBox so the user
+                   can still select + copy text. -->
+              <TextBox Text="{Binding TextPreviewContent, Mode=OneWay}"
+                       Visibility="{Binding ShowTextPreview, Converter={StaticResource BoolToVis}}"
+                       IsReadOnly="True"
+                       FontFamily="Consolas" FontSize="12"
+                       Background="{StaticResource BgPanel}"
+                       Foreground="{StaticResource TextPrimary}"
+                       BorderThickness="0"
+                       VerticalScrollBarVisibility="Auto"
+                       HorizontalScrollBarVisibility="Auto"
+                       TextWrapping="NoWrap"
+                       AcceptsReturn="True"
+                       Padding="12"/>
               <!-- Deep-scan progress overlay -->
               <Border VerticalAlignment="Bottom" HorizontalAlignment="Stretch"
                       Margin="12,0,12,12" Padding="10,8" CornerRadius="6"
@@ -963,8 +1381,10 @@
                     Visibility="{Binding ShowThumbnailStrip, Converter={StaticResource BoolToVis}}">
               <ScrollViewer HorizontalScrollBarVisibility="Auto"
                             VerticalScrollBarVisibility="Hidden"
-                            Padding="4,6">
-                <ItemsControl ItemsSource="{Binding ThumbnailStrip}">
+                            Padding="4,6"
+                            x:Name="ThumbnailStripScroller">
+                <ItemsControl ItemsSource="{Binding ThumbnailStrip}"
+                              x:Name="ThumbnailStripItems">
                   <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
                       <StackPanel Orientation="Horizontal"/>
@@ -974,9 +1394,19 @@
                     <DataTemplate>
                       <Button Margin="3,0" Padding="0" BorderThickness="0"
                               Background="Transparent" Cursor="Hand"
+                              Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=Window}}"
                               Command="{Binding DataContext.SelectThumbnailCommand,
                                         RelativeSource={RelativeSource AncestorType=Window}}"
                               CommandParameter="{Binding}">
+                        <Button.ContextMenu>
+                          <ContextMenu>
+                            <MenuItem Header="Tag this frame…"
+                                      Command="{Binding PlacementTarget.Tag.TagFrameCommand,
+                                                RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                      CommandParameter="{Binding PlacementTarget.DataContext,
+                                                          RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                          </ContextMenu>
+                        </Button.ContextMenu>
                         <Border CornerRadius="4" BorderThickness="2" Width="116" Height="80">
                           <Border.Style>
                             <Style TargetType="Border">
@@ -1256,25 +1686,78 @@
                       </ItemsControl.ItemTemplate>
                     </ItemsControl>
                   </StackPanel>
-                  <!-- Add tag input -->
+                  <!-- Add tag input — with autocomplete popup -->
                   <Grid Margin="0,6,0,0">
                     <Grid.ColumnDefinitions>
                       <ColumnDefinition Width="*"/>
                       <ColumnDefinition Width="6"/>
                       <ColumnDefinition Width="32"/>
                     </Grid.ColumnDefinitions>
-                    <TextBox Grid.Column="0"
+                    <TextBox Grid.Column="0" x:Name="NewTagBox"
                              Text="{Binding NewTagText, UpdateSourceTrigger=PropertyChanged}"
-                             ToolTip="Type a tag name and press Enter">
+                             ToolTip="Type a tag name. Press Enter to add as new, or click a suggestion below.">
                       <TextBox.InputBindings>
                         <KeyBinding Key="Return" Command="{Binding CreateAndAddTagCommand}"/>
                       </TextBox.InputBindings>
                     </TextBox>
+                    <Popup IsOpen="{Binding IsTagSuggestionsOpen, Mode=OneWay}"
+                           PlacementTarget="{Binding ElementName=NewTagBox}"
+                           Placement="Bottom" StaysOpen="True" AllowsTransparency="True"
+                           Focusable="False">
+                      <Border Background="{StaticResource BgPanel}"
+                              BorderBrush="{StaticResource Border}"
+                              BorderThickness="1" CornerRadius="6" Padding="2"
+                              MinWidth="{Binding ElementName=NewTagBox, Path=ActualWidth}">
+                        <Border.Effect>
+                          <DropShadowEffect BlurRadius="14" ShadowDepth="3" Opacity="0.45" Color="Black"/>
+                        </Border.Effect>
+                        <ItemsControl ItemsSource="{Binding TagSuggestions}" KeyboardNavigation.TabNavigation="Continue">
+                          <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                              <Button HorizontalContentAlignment="Left" Padding="6,3" Margin="0"
+                                      Background="Transparent" BorderThickness="0" Cursor="Hand"
+                                      Command="{Binding DataContext.AcceptTagSuggestionCommand,
+                                                RelativeSource={RelativeSource AncestorType=Window}}"
+                                      CommandParameter="{Binding}">
+                                <Button.Template>
+                                  <ControlTemplate TargetType="Button">
+                                    <Border x:Name="Bg" Background="Transparent" Padding="{TemplateBinding Padding}" CornerRadius="3">
+                                      <ContentPresenter HorizontalAlignment="Left" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                      <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="Bg" Property="Background" Value="{StaticResource BgMid}"/>
+                                      </Trigger>
+                                    </ControlTemplate.Triggers>
+                                  </ControlTemplate>
+                                </Button.Template>
+                                <StackPanel Orientation="Horizontal">
+                                  <Border CornerRadius="3" Padding="5,1" Margin="0,0,6,0"
+                                          Background="{Binding Color, Converter={StaticResource StringToBrush}}">
+                                    <TextBlock Text="{Binding Name}" FontSize="10" Foreground="White"/>
+                                  </Border>
+                                </StackPanel>
+                              </Button>
+                            </DataTemplate>
+                          </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                      </Border>
+                    </Popup>
                     <Button Grid.Column="2" Content="+" Height="28"
                             Style="{StaticResource PrimaryButton}"
                             Command="{Binding CreateAndAddTagCommand}"/>
                   </Grid>
                 </StackPanel>
+
+                <!-- Tag selected frame (visual fingerprint) -->
+                <Button Margin="0,6,0,0"
+                        Command="{Binding TagSelectedFrameCommand}"
+                        Height="28" HorizontalAlignment="Stretch"
+                        BorderThickness="0" Cursor="Hand"
+                        Background="#3A3A5C" Foreground="{StaticResource TextPrimary}" FontSize="12"
+                        Content="Tag selected frame…"
+                        ToolTip="Save the selected frame's visual fingerprint with a tag. The tag will be proposed when matching frames appear in other files."
+                        Visibility="{Binding ShowVideoPreview, Converter={StaticResource BoolToVis}}"/>
 
                 <!-- Deep Scan -->
                 <Grid Margin="0,12,0,0">
@@ -1305,7 +1788,7 @@
                   </Button>
                 </Grid>
 
-                <!-- Identify Episode -->
+                <!-- Identify -->
                 <Button Margin="0,6,0,0"
                         Command="{Binding IdentifyEpisodeCommand}"
                         Height="28" HorizontalAlignment="Stretch"
@@ -1313,7 +1796,7 @@
                         Background="#7C6FF7" Foreground="White" FontSize="12">
                   <Button.Style>
                     <Style TargetType="Button">
-                      <Setter Property="Content" Value="Identify Episode"/>
+                      <Setter Property="Content" Value="Identify"/>
                       <Setter Property="Visibility" Value="Collapsed"/>
                       <Style.Triggers>
                         <DataTrigger Binding="{Binding ShowVideoPreview}" Value="True">
@@ -1444,11 +1927,50 @@
     </Grid>
 
     <!-- ═══════════════════ STATUS BAR ═══════════════════ -->
-    <Border Grid.Row="2" Background="{StaticResource BgPanel}"
-            BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0" Padding="14,0">
+    <Border Grid.Row="2" Height="28" Background="{StaticResource BgPanel}"
+            BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0" Padding="14,0"
+            Visibility="{Binding IsPreviewMaximized, Converter={StaticResource InvBoolToVis}}">
       <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center"
                  FontSize="12" Foreground="{StaticResource TextSecondary}"/>
     </Border>
+
+    <!-- Modal overlay during Scan-for-tags. Locks the whole window. -->
+    <Grid Grid.Row="0" Grid.RowSpan="3" Background="#CC0D0D1A" Panel.ZIndex="999"
+          Visibility="{Binding IsScanningForTags, Converter={StaticResource BoolToVis}}">
+      <Border Background="{StaticResource BgPanel}" CornerRadius="10"
+              BorderBrush="{StaticResource Border}" BorderThickness="1"
+              Padding="28,24" Width="520"
+              HorizontalAlignment="Center" VerticalAlignment="Center">
+        <Border.Effect>
+          <DropShadowEffect BlurRadius="32" ShadowDepth="6" Opacity="0.55" Color="Black"/>
+        </Border.Effect>
+        <StackPanel>
+          <TextBlock Text="Scanning for tags…" FontSize="16" FontWeight="SemiBold"
+                     Foreground="{StaticResource TextPrimary}" Margin="0,0,0,4"/>
+          <TextBlock FontSize="12" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,16">
+            <Run Text="{Binding ScanFilesDone, Mode=OneWay}"/><Run Text=" of "/><Run Text="{Binding ScanFilesTotal, Mode=OneWay}"/><Run Text=" files complete"/>
+          </TextBlock>
+          <ProgressBar Value="{Binding ScanProgressPercent, Mode=OneWay}" Minimum="0" Maximum="100"
+                       Height="6" BorderThickness="0" Margin="0,0,0,12">
+            <ProgressBar.Template>
+              <ControlTemplate TargetType="ProgressBar">
+                <Border Background="#33FFFFFF" CornerRadius="3" ClipToBounds="True">
+                  <Border x:Name="PART_Indicator" HorizontalAlignment="Left"
+                          Background="{StaticResource Accent}" CornerRadius="3"/>
+                </Border>
+              </ControlTemplate>
+            </ProgressBar.Template>
+          </ProgressBar>
+          <TextBlock Text="{Binding ScanCurrentFile}" FontSize="11"
+                     Foreground="{StaticResource TextSecondary}" FontFamily="Consolas"
+                     TextTrimming="CharacterEllipsis" Margin="0,0,0,18"/>
+          <Button Content="Cancel" Height="30" Padding="16,0"
+                  HorizontalAlignment="Right"
+                  Style="{StaticResource SecondaryButton}"
+                  Command="{Binding CancelScanForTagsCommand}"/>
+        </StackPanel>
+      </Border>
+    </Grid>
 
   </Grid>
 </Window>

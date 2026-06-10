@@ -25,6 +25,17 @@ public class FileRecord : INotifyPropertyChanged
     public ObservableCollection<TagDefinition>  Tags           { get; } = [];
     public ObservableCollection<SearchPattern>  MatchedPatterns { get; } = [];
 
+    /// <summary>
+    /// Sort key for the Tags column — alphabetised, comma-joined tag names.
+    /// Files with no tags sort after files with tags (use 0xFFFF prefix).
+    /// Recomputed lazily on the getter; bound by <see cref="SortDescription"/>
+    /// in <c>ApplySort</c>, which re-reads it whenever the view re-sorts.
+    /// </summary>
+    public string TagsSortKey =>
+        Tags.Count == 0
+            ? "￾"  // sorts last in ascending
+            : string.Join(",", Tags.Select(t => t.Name).OrderBy(n => n, StringComparer.OrdinalIgnoreCase));
+
     public string FullPath
     {
         get => _fullPath;

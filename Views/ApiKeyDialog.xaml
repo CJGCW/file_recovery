@@ -20,7 +20,7 @@
     </Grid.RowDefinitions>
 
     <!-- Google Cloud Vision -->
-    <TextBlock Grid.Row="0" Text="Google Cloud Vision API key (required for identification)"
+    <TextBlock Grid.Row="0" Text="Google Cloud Vision API key (optional — visual identification)"
                FontSize="11" Foreground="#9090B0" Margin="0,0,0,6"/>
     <TextBox x:Name="VisionKeyBox" Grid.Row="2"
              Background="#252540" Foreground="#E0E0E0"

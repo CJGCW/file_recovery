@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
@@ -8,6 +9,7 @@ using System.Threading.Channels;
 using System.Windows;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using FileRecoveryParser.Models;
 using FileRecoveryParser.Services;
@@ -35,6 +37,34 @@ public class MainViewModel : INotifyPropertyChanged
     private CancellationTokenSource? _ocrCts;
     private CancellationTokenSource? _thumbCts;
     private double _timelineValue;
+    private double _previewImagePixelWidth;
+    private double _previewImagePixelHeight;
+
+    // ── Delete mode (bulk delete by extension under a chosen folder) ─────────
+    private bool _isDeleteMode;
+    private bool _isDeleting;
+    private double _deleteProgress;
+    private List<string>? _preDeleteModeCheckedExtensions;
+
+    // ── Manual region selection on image preview ─────────────────────────────
+    private System.Windows.Rect _selectedRegion = System.Windows.Rect.Empty;
+
+    // ── Scan-for-tags (modal scan of selected files producing reviewable results) ──
+    private bool   _isScanningForTags;
+    private int    _scanFilesDone;
+    private int    _scanFilesTotal;
+    private string _scanCurrentFile = string.Empty;
+    private CancellationTokenSource? _scanForTagsCts;
+    public ObservableCollection<ScanResult> ScanResults { get; } = [];
+
+    // ── Cached selection counts (kept in sync via Record_PropertyChanged) ────
+    // CanExecute is called by CommandManager on every UI tick (focus, key,
+    // mouse). With 740k files an O(n) iteration per tick froze the app, so
+    // selection counts are maintained incrementally instead.
+    private int _selectedCount;
+    private readonly int[] _selectedByCategory =
+        new int[Enum.GetValues<FileCategory>().Length];
+
     private bool   _isDeepScanning;
     private double _deepScanProgress;
     private bool   _isIdentifying;
@@ -51,8 +81,16 @@ public class MainViewModel : INotifyPropertyChanged
 
     // ── Tagging ──────────────────────────────────────────────────────────────
     private readonly TagStore _tagStore = new();
+    private readonly FrameTagStore _frameTagStore = new();
     private string _newTagText = string.Empty;
     private IList<string> _suggestedTags = [];
+
+    // ── In-memory scan cache (lifetime: app session) ─────────────────────────
+    // Keyed by FileRecord.FullPath. Stored as a snapshot of the ThumbnailStrip
+    // at the time the user last left the file. Skips redoing quick + deep
+    // scans when the user revisits a previously-scanned video.
+    private readonly Dictionary<string, List<VideoFrame>> _scanCache =
+        new(StringComparer.OrdinalIgnoreCase);
 
     // ── Text search ──────────────────────────────────────────────────────────
     private string _newSearchText        = string.Empty;
@@ -69,6 +107,23 @@ public class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<CategoryExtensionGroup> FileTypeGroups    { get; } = [];
     public ObservableCollection<ImageGroupFilter>        ImageGroupFilters { get; } = [];
     public ObservableCollection<VideoFrame>              ThumbnailStrip    { get; } = [];
+    public ObservableCollection<DetectedFaceVm>          DetectedFaces     { get; } = [];
+
+    // Per-column filter state for the main file grid. Each ColumnFilter holds
+    // a list of distinct observed values with check-states; when at least one
+    // is unchecked, ApplyFilter rejects rows whose value isn't allowed. Values
+    // are rebuilt on demand from _allFiles when the user opens the popup.
+    public ColumnFilter ExtColumnFilter      { get; } = new();
+    public ColumnFilter CategoryColumnFilter { get; } = new();
+    public ColumnFilter TagsColumnFilter     { get; } = new();
+
+    private ColumnFilter? GetColumnFilter(string? key) => key switch
+    {
+        "Extension" => ExtColumnFilter,
+        "Category"  => CategoryColumnFilter,
+        "Tags"      => TagsColumnFilter,
+        _           => null,
+    };
 
     // ── Constructor ──────────────────────────────────────────────────────────
 
@@ -93,6 +148,16 @@ public class MainViewModel : INotifyPropertyChanged
         MoveCommand            = new RelayCommand(_ => ExecuteMove(),   _ => SelectedCount > 0);
         RenameCommand          = new RelayCommand(_ => ExecuteRename(), _ => SelectedCount > 0);
         DeleteCommand          = new RelayCommand(_ => ExecuteDelete(), _ => SelectedCount > 0);
+        OpenLocationCommand    = new RelayCommand(_ => OpenSelectedLocation(),
+                                       _ => SelectedFile is not null || SelectedCount == 1);
+        ToggleDeleteModeCommand = new RelayCommand(_ => IsDeleteMode = !IsDeleteMode);
+        DeleteByExtensionsCommand = new RelayCommand(_ => DeleteByExtensions(),
+                                       _ => IsDeleteMode && FileTypeGroups.SelectMany(g => g.Extensions).Any(e => e.IsChecked));
+        ScanForTagsCommand     = new RelayCommand(_ => ScanForTagsAsync(),
+                                       _ => CanScanForTags());
+        CancelScanForTagsCommand = new RelayCommand(_ => _scanForTagsCts?.Cancel(),
+                                       _ => _isScanningForTags);
+        ManageTagsCommand      = new RelayCommand(_ => OpenTagManagement());
         ApplySuggestionCommand         = new RelayCommand(s => ApplySuggestion(s as SuggestionResult));
         TogglePreviewMaximizeCommand   = new RelayCommand(_ => IsPreviewMaximized = !IsPreviewMaximized);
         FindDuplicatesCommand          = new RelayCommand(_ => FindDuplicatesAsync(),
@@ -100,6 +165,16 @@ public class MainViewModel : INotifyPropertyChanged
         AddTagCommand                  = new RelayCommand(p => AddTag(p as string), _ => SelectedFile is not null);
         RemoveTagCommand               = new RelayCommand(p => RemoveTag(p as TagDefinition), _ => SelectedFile is not null);
         CreateAndAddTagCommand         = new RelayCommand(_ => CreateAndAddTag(), _ => SelectedFile is not null && !string.IsNullOrWhiteSpace(NewTagText));
+        TagFrameCommand                = new RelayCommand(p => TagFrame(p as VideoFrame),
+                                             _ => SelectedFile is not null && ThumbnailStrip.Count > 0);
+        TagSelectedFrameCommand        = new RelayCommand(_ => TagFrame(
+                                                             ThumbnailStrip.FirstOrDefault(f => f.IsSelected)
+                                                             ?? ThumbnailStrip.FirstOrDefault()),
+                                             _ => SelectedFile is not null && ThumbnailStrip.Count > 0);
+        TagFaceCommand                 = new RelayCommand(p => TagFace(p as DetectedFaceVm),
+                                             _ => SelectedFile is not null);
+        TagRegionCommand               = new RelayCommand(_ => TagRegion(),
+                                             _ => SelectedFile is not null && !_selectedRegion.IsEmpty && PreviewImage is not null);
         DeepScanCommand                = new RelayCommand(_ => DeepScanAsync(),
                                              _ => ShowVideoPreview && !_isDeepScanning && !_isIdentifying);
         SelectThumbnailCommand         = new RelayCommand(p =>
@@ -110,7 +185,7 @@ public class MainViewModel : INotifyPropertyChanged
             f.IsSelected = true;
         });
         IdentifyEpisodeCommand         = new RelayCommand(_ => IdentifyEpisodeAsync(),
-                                             _ => ShowVideoPreview && PreviewImage is not null && !_isIdentifying && !_isDeepScanning);
+                                             _ => ShowVideoPreview && !_isIdentifying && !_isDeepScanning);
         IdentifyIconCommand            = new RelayCommand(_ => IdentifyIconAsync(),
                                              _ => ShowIconIdentify && PreviewImage is not null && !_isIdentifying);
         AddSearchPatternCommand        = new RelayCommand(_ => AddSearchPattern(), _ => !string.IsNullOrWhiteSpace(NewSearchText));
@@ -119,6 +194,91 @@ public class MainViewModel : INotifyPropertyChanged
                                              _ => SearchPatterns.Count > 0 && _allFiles.Count > 0 && !_isScanning && !_isSearching);
         ClearSearchCommand             = new RelayCommand(_ => ClearSearch(),
                                              _ => SearchPatterns.Count > 0 || _allFiles.Any(f => f.MatchedPatterns.Count > 0));
+
+        // Column-filter commands. Refresh = rebuild the value list from current
+        // _allFiles (called when the popup opens). Apply = commit check states
+        // + refresh the grid view. Clear = check all + refresh.
+        RefreshColumnFilterCommand = new RelayCommand(p =>
+        {
+            switch (p as string)
+            {
+                case "Extension": ExtColumnFilter.RebuildValues(
+                    _allFiles.Select(f => f.Extension ?? string.Empty)); break;
+                case "Category":  CategoryColumnFilter.RebuildValues(
+                    _allFiles.Select(f => f.Category.ToString())); break;
+                case "Tags":      TagsColumnFilter.RebuildValues(
+                    _allFiles.SelectMany(f => f.Tags.Count == 0
+                        ? new[] { string.Empty }
+                        : f.Tags.Select(t => t.Name))); break;
+            }
+        });
+        ApplyColumnFilterCommand = new RelayCommand(p =>
+        {
+            switch (p as string)
+            {
+                case "Extension": ExtColumnFilter.Apply();      break;
+                case "Category":  CategoryColumnFilter.Apply(); break;
+                case "Tags":      TagsColumnFilter.Apply();     break;
+            }
+            RefreshFilter();
+        });
+        ClearColumnFilterCommand = new RelayCommand(p =>
+        {
+            switch (p as string)
+            {
+                case "Extension": ExtColumnFilter.ClearAndCheckAll();      break;
+                case "Category":  CategoryColumnFilter.ClearAndCheckAll(); break;
+                case "Tags":      TagsColumnFilter.ClearAndCheckAll();     break;
+            }
+            RefreshFilter();
+        });
+
+        // In-popup Select all / Deselect all. These flip the checkbox state
+        // of every visible row but DON'T commit — the user still has to click
+        // Apply for the change to take effect on the grid. This matches the
+        // Excel-style filter popup convention.
+        SelectAllColumnValuesCommand = new RelayCommand(p =>
+        {
+            var f = GetColumnFilter(p as string);
+            if (f is null) return;
+            foreach (var v in f.Values) v.IsChecked = true;
+        });
+        DeselectAllColumnValuesCommand = new RelayCommand(p =>
+        {
+            var f = GetColumnFilter(p as string);
+            if (f is null) return;
+            foreach (var v in f.Values) v.IsChecked = false;
+        });
+
+        // Click on an autocomplete suggestion: add the existing tag to the
+        // current file and clear the input so the user can type the next one.
+        AcceptTagSuggestionCommand = new RelayCommand(p =>
+        {
+            if (p is not TagDefinition def || SelectedFile is null) return;
+            NewTagText = string.Empty;   // also clears TagSuggestions via setter
+            AddTag(def.Name);
+        });
+
+        // Reopen the Scan Results window with the results from the most
+        // recent scan-for-tags run. ScanResults persists on the VM for the
+        // lifetime of the session (only cleared when the next scan starts),
+        // so the user can close the window, work on files, and come back.
+        // Reuses an already-open window via _scanResultsWindow so we don't
+        // end up with two windows showing the same data.
+        OpenScanResultsCommand = new RelayCommand(_ => ShowScanResultsWindow(),
+                                                  _ => ScanResults.Count > 0);
+
+        // Clear any active sort on the main file grid — empties
+        // FileView.SortDescriptions and blanks SortColumn so the ↑/↓ indicator
+        // disappears from the column header. Disabled when nothing is sorted.
+        ClearSortCommand = new RelayCommand(_ => ClearSort(),
+                                            _ => IsSorted);
+
+        // Master Select-all / Deselect-all for the sidebar FILE TYPES list.
+        // If anything is currently unchecked, we check everything; otherwise
+        // (all already on) we uncheck everything. One button, two behaviours,
+        // matching the most common "fix this filter" intent in either direction.
+        ToggleAllFileTypesCommand = new RelayCommand(_ => ToggleAllFileTypes());
 
         InitialiseFileTypeGroups();
     }
@@ -134,7 +294,7 @@ public class MainViewModel : INotifyPropertyChanged
     public string SearchText
     {
         get => _searchText;
-        set { _searchText = value; OnPropertyChanged(); FileView.Refresh(); }
+        set { _searchText = value; OnPropertyChanged(); RefreshFilter(); }
     }
 
     public bool IsScanning
@@ -153,7 +313,7 @@ public class MainViewModel : INotifyPropertyChanged
 
     public int FileCount => FileView.Cast<object>().Count();
 
-    public int SelectedCount => _allFiles.Count(f => f.IsSelected);
+    public int SelectedCount => _selectedCount;
 
     public bool? AllSelected
     {
@@ -195,6 +355,9 @@ public class MainViewModel : INotifyPropertyChanged
                 ? _suggestionCache.GetValueOrDefault(value.Id, [])
                 : [];
             SuggestedTags = value is not null ? ComputeSuggestedTags(value) : [];
+            // The "already on file" filter for autocomplete depends on which
+            // file is selected, so refresh suggestions when the file changes.
+            UpdateTagSuggestions();
         }
     }
 
@@ -274,6 +437,23 @@ public class MainViewModel : INotifyPropertyChanged
         set { _showDocumentPreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowAnyPreview)); }
     }
 
+    // Inline plain-text preview — used for .txt and other text-like extensions
+    // where the Shell preview handler is often missing, broken, or 32-bit-only
+    // (which silently fails in our 64-bit host). We just read the file and
+    // dump it into a TextBox instead.
+    private bool   _showTextPreview;
+    private string _textPreviewContent = string.Empty;
+    public bool ShowTextPreview
+    {
+        get => _showTextPreview;
+        set { _showTextPreview = value; OnPropertyChanged(); OnPropertyChanged(nameof(ShowAnyPreview)); }
+    }
+    public string TextPreviewContent
+    {
+        get => _textPreviewContent;
+        set { _textPreviewContent = value; OnPropertyChanged(); }
+    }
+
     public bool IsDeepScanning
     {
         get => _isDeepScanning;
@@ -292,8 +472,144 @@ public class MainViewModel : INotifyPropertyChanged
         private set { _isIdentifying = value; OnPropertyChanged(); CommandManager.InvalidateRequerySuggested(); }
     }
 
+    public bool IsDeleteMode
+    {
+        get => _isDeleteMode;
+        set
+        {
+            if (_isDeleteMode == value) return;
+            _isDeleteMode = value;
+            if (value) EnterDeleteMode();
+            else       ExitDeleteMode();
+            OnPropertyChanged();
+            CommandManager.InvalidateRequerySuggested();
+        }
+    }
+
+    public bool IsDeleting
+    {
+        get => _isDeleting;
+        private set { _isDeleting = value; OnPropertyChanged(); CommandManager.InvalidateRequerySuggested(); }
+    }
+
+    public double DeleteProgress
+    {
+        get => _deleteProgress;
+        private set { _deleteProgress = value; OnPropertyChanged(); }
+    }
+
+
+    // The user-drawn region rectangle in original-pixel (oriented) coordinates,
+    // set by the image preview overlay's mouse handlers.
+    public System.Windows.Rect SelectedRegion
+    {
+        get => _selectedRegion;
+        set { _selectedRegion = value; OnPropertyChanged(); CommandManager.InvalidateRequerySuggested(); }
+    }
+
+    // ── Scan-for-tags ─────────────────────────────────────────────────────────
+
+    public bool AutoApplyScanResults
+    {
+        get => _appSettings.AutoApplyScanResults;
+        set
+        {
+            if (_appSettings.AutoApplyScanResults == value) return;
+            _appSettings.AutoApplyScanResults = value;
+            _appSettings.Save();
+            OnPropertyChanged();
+        }
+    }
+
+    public string ExcludedFolderNames
+    {
+        get => _appSettings.ExcludedFolderNames ?? string.Empty;
+        set
+        {
+            var v = value ?? string.Empty;
+            if (_appSettings.ExcludedFolderNames == v) return;
+            _appSettings.ExcludedFolderNames = v;
+            _appSettings.Save();
+            OnPropertyChanged();
+        }
+    }
+
+    private HashSet<string> ParseExcludedFolderNames() =>
+        new HashSet<string>(
+            (_appSettings.ExcludedFolderNames ?? string.Empty)
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            StringComparer.OrdinalIgnoreCase);
+
+    public bool IsScanningForTags
+    {
+        get => _isScanningForTags;
+        private set { _isScanningForTags = value; OnPropertyChanged(); CommandManager.InvalidateRequerySuggested(); }
+    }
+
+    public int ScanFilesDone
+    {
+        get => _scanFilesDone;
+        private set { _scanFilesDone = value; OnPropertyChanged(); OnPropertyChanged(nameof(ScanProgressPercent)); }
+    }
+
+    public int ScanFilesTotal
+    {
+        get => _scanFilesTotal;
+        private set { _scanFilesTotal = value; OnPropertyChanged(); OnPropertyChanged(nameof(ScanProgressPercent)); }
+    }
+
+    public double ScanProgressPercent =>
+        _scanFilesTotal > 0 ? _scanFilesDone * 100.0 / _scanFilesTotal : 0;
+
+    public string ScanCurrentFile
+    {
+        get => _scanCurrentFile;
+        private set { _scanCurrentFile = value; OnPropertyChanged(); }
+    }
+
+    public string ScanForTagsDisabledReason
+    {
+        get
+        {
+            if (_selectedCount == 0)
+                return "Check at least one row in the grid.";
+            int imageCount = _selectedByCategory[(int)FileCategory.Image];
+            int videoCount = _selectedByCategory[(int)FileCategory.Video];
+            bool allImage = imageCount == _selectedCount && imageCount > 0;
+            bool allVideo = videoCount == _selectedCount && videoCount > 0;
+            if (!allImage && !allVideo)
+                return "All checked rows must be the same file type (all Video, or all Image).";
+            if (_frameTagStore.Frames.Count == 0)
+                return "Tag at least one frame or region first.";
+            return string.Empty;
+        }
+    }
+
+    private bool CanScanForTags()
+    {
+        if (_isScanningForTags) return false;
+        if (_selectedCount == 0) return false;
+        if (_frameTagStore.Frames.Count == 0) return false;
+        int imageCount = _selectedByCategory[(int)FileCategory.Image];
+        int videoCount = _selectedByCategory[(int)FileCategory.Video];
+        return (imageCount == _selectedCount && imageCount > 0) ||
+               (videoCount == _selectedCount && videoCount > 0);
+    }
+
+    public double PreviewImagePixelWidth
+    {
+        get => _previewImagePixelWidth;
+        private set { _previewImagePixelWidth = value; OnPropertyChanged(); }
+    }
+
+    public double PreviewImagePixelHeight
+    {
+        get => _previewImagePixelHeight;
+        private set { _previewImagePixelHeight = value; OnPropertyChanged(); }
+    }
+
     public bool ShowMediaPreview   => _showImagePreview || _showVideoPreview;
-    public bool ShowAnyPreview     => _showImagePreview || _showVideoPreview || _showDocumentPreview || _isDeepScanning;
+    public bool ShowAnyPreview     => _showImagePreview || _showVideoPreview || _showDocumentPreview || _showTextPreview || _isDeepScanning;
 
     public bool IsPreviewMaximized
     {
@@ -321,10 +637,66 @@ public class MainViewModel : INotifyPropertyChanged
 
     public ObservableCollection<TagDefinition> AllTags { get; private set; } = [];
 
+    /// <summary>
+    /// Autocomplete suggestions for the "Add tag" input. Recomputed on every
+    /// NewTagText keystroke by word-prefix matching against AllTags, excluding
+    /// tags the currently-selected file already has. Capped at 10 entries.
+    /// </summary>
+    public ObservableCollection<TagDefinition> TagSuggestions { get; } = [];
+
+    public bool IsTagSuggestionsOpen => TagSuggestions.Count > 0;
+
     public string NewTagText
     {
         get => _newTagText;
-        set { _newTagText = value; OnPropertyChanged(); CommandManager.InvalidateRequerySuggested(); }
+        set
+        {
+            _newTagText = value;
+            OnPropertyChanged();
+            UpdateTagSuggestions();
+            CommandManager.InvalidateRequerySuggested();
+        }
+    }
+
+    // Word-prefix match: "To" matches "Tom & Jerry" (word "Tom") and
+    // "Tiny Toons" (word "Toons"). Cheap enough to recompute on every
+    // keystroke — AllTags is typically tens of entries, not thousands.
+    private void UpdateTagSuggestions()
+    {
+        TagSuggestions.Clear();
+        var q = (_newTagText ?? string.Empty).Trim();
+        if (q.Length == 0)
+        {
+            OnPropertyChanged(nameof(IsTagSuggestionsOpen));
+            return;
+        }
+
+        var alreadyOnFile = SelectedFile is null
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(SelectedFile.Tags.Select(t => t.Name), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var t in AllTags)
+        {
+            if (alreadyOnFile.Contains(t.Name)) continue;
+            if (!TagMatches(t.Name, q))         continue;
+            // Skip an exact match — Enter on the textbox already adds it.
+            if (string.Equals(t.Name, q, StringComparison.OrdinalIgnoreCase)) continue;
+
+            TagSuggestions.Add(t);
+            if (TagSuggestions.Count >= 10) break;
+        }
+
+        OnPropertyChanged(nameof(IsTagSuggestionsOpen));
+    }
+
+    private static readonly char[] TagWordSeparators = [' ', '_', '-', '.', ',', '&', '/', '\\'];
+
+    private static bool TagMatches(string tag, string query)
+    {
+        if (tag.StartsWith(query, StringComparison.OrdinalIgnoreCase)) return true;
+        foreach (var word in tag.Split(TagWordSeparators, StringSplitOptions.RemoveEmptyEntries))
+            if (word.StartsWith(query, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
     }
 
     public IList<string> SuggestedTags
@@ -382,8 +754,18 @@ public class MainViewModel : INotifyPropertyChanged
     public ICommand ApplySuggestionCommand       { get; }
     public ICommand TogglePreviewMaximizeCommand { get; }
     public ICommand DeleteCommand                { get; }
+    public ICommand OpenLocationCommand          { get; }
+    public ICommand ToggleDeleteModeCommand      { get; }
+    public ICommand DeleteByExtensionsCommand    { get; }
+    public ICommand ScanForTagsCommand           { get; }
+    public ICommand CancelScanForTagsCommand     { get; }
+    public ICommand ManageTagsCommand            { get; }
     public ICommand FindDuplicatesCommand        { get; }
     public ICommand AddTagCommand                { get; }
+    public ICommand TagFrameCommand              { get; }
+    public ICommand TagSelectedFrameCommand      { get; }
+    public ICommand TagFaceCommand               { get; }
+    public ICommand TagRegionCommand             { get; }
     public ICommand RemoveTagCommand             { get; }
     public ICommand CreateAndAddTagCommand       { get; }
     public ICommand AddSearchPatternCommand      { get; }
@@ -394,6 +776,15 @@ public class MainViewModel : INotifyPropertyChanged
     public ICommand SelectThumbnailCommand       { get; }
     public ICommand IdentifyEpisodeCommand       { get; }
     public ICommand IdentifyIconCommand          { get; }
+    public ICommand RefreshColumnFilterCommand   { get; }
+    public ICommand ApplyColumnFilterCommand     { get; }
+    public ICommand ClearColumnFilterCommand     { get; }
+    public ICommand SelectAllColumnValuesCommand   { get; }
+    public ICommand DeselectAllColumnValuesCommand { get; }
+    public ICommand AcceptTagSuggestionCommand   { get; }
+    public ICommand OpenScanResultsCommand       { get; }
+    public ICommand ClearSortCommand             { get; }
+    public ICommand ToggleAllFileTypesCommand    { get; }
 
     // ── Scanning ─────────────────────────────────────────────────────────────
 
@@ -428,12 +819,16 @@ public class MainViewModel : INotifyPropertyChanged
         var allowedExtensions = FileTypeGroups
             .SelectMany(g => g.Extensions.Where(e => e.IsChecked).Select(e => e.Extension))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        bool allExtensionsAllowed = allowedExtensions.Count ==
-            FileTypeGroups.Sum(g => g.Extensions.Count);
+        // Treat "nothing checked" the same as "everything checked" — the user
+        // most likely just cleared the filter and a literal interpretation
+        // (filter out every extension) would silently drop the entire scan.
+        bool allExtensionsAllowed = allowedExtensions.Count == 0 ||
+            allowedExtensions.Count == FileTypeGroups.Sum(g => g.Extensions.Count);
 
+        var excludedFolders = ParseExcludedFolderNames();
         Task.Run(async () =>
         {
-            var scanner = new FileScanner();
+            var scanner = new FileScanner(extraSkippedFolderNames: excludedFolders);
             int found = 0, skipped = 0;
 
             try
@@ -522,19 +917,52 @@ public class MainViewModel : INotifyPropertyChanged
 
     private void Record_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(FileRecord.IsSelected))
-            RaiseSelectionChanged();
+        if (e.PropertyName != nameof(FileRecord.IsSelected)) return;
+        if (sender is not FileRecord record) return;
+
+        int catIdx = (int)record.Category;
+        bool inRange = catIdx >= 0 && catIdx < _selectedByCategory.Length;
+        if (record.IsSelected)
+        {
+            _selectedCount++;
+            if (inRange) _selectedByCategory[catIdx]++;
+        }
+        else
+        {
+            _selectedCount--;
+            if (inRange) _selectedByCategory[catIdx]--;
+        }
+        RaiseSelectionChanged();
     }
 
     private void RaiseSelectionChanged()
     {
         OnPropertyChanged(nameof(SelectedCount));
         OnPropertyChanged(nameof(AllSelected));
+        OnPropertyChanged(nameof(ScanForTagsDisabledReason));
+        CommandManager.InvalidateRequerySuggested();
+    }
+
+    // Removes a record's PropertyChanged subscription AND adjusts the cached
+    // selected counts if the record was selected at removal time. Call this
+    // instead of doing the unsubscribe directly when deleting from _allFiles.
+    private void DetachRecord(FileRecord record)
+    {
+        if (record.IsSelected)
+        {
+            _selectedCount = Math.Max(0, _selectedCount - 1);
+            int catIdx = (int)record.Category;
+            if (catIdx >= 0 && catIdx < _selectedByCategory.Length)
+                _selectedByCategory[catIdx] = Math.Max(0, _selectedByCategory[catIdx] - 1);
+        }
+        record.PropertyChanged -= Record_PropertyChanged;
     }
 
     private void ClearResults()
     {
         foreach (var r in _allFiles) r.PropertyChanged -= Record_PropertyChanged;
+        _selectedCount = 0;
+        Array.Clear(_selectedByCategory);
         _ocrCts?.Cancel();
         _ocrCts = null;
         _allFiles.Clear();
@@ -547,6 +975,8 @@ public class MainViewModel : INotifyPropertyChanged
         ShowImagePreview    = false;
         ShowVideoPreview    = false;
         ShowDocumentPreview = false;
+        ShowTextPreview     = false;
+        TextPreviewContent  = string.Empty;
         PreviewFilePath     = null;
         SelectedFile        = null;
         OnPropertyChanged(nameof(ShowMetadata));
@@ -697,7 +1127,7 @@ public class MainViewModel : INotifyPropertyChanged
                     SelectedFile = null;
                 }
                 _suggestionCache.TryRemove(record.Id, out _);
-                record.PropertyChanged -= Record_PropertyChanged;
+                DetachRecord(record);
                 Application.Current.Dispatcher.Invoke(() => _allFiles.Remove(record));
                 deleted++;
             }
@@ -713,6 +1143,518 @@ public class MainViewModel : INotifyPropertyChanged
 
         OnPropertyChanged(nameof(FileCount));
         RaiseSelectionChanged();
+    }
+
+    // ── Delete mode ───────────────────────────────────────────────────────────
+
+    private void EnterDeleteMode()
+    {
+        // Remember the previous extension check state so we can restore it on exit.
+        _preDeleteModeCheckedExtensions = FileTypeGroups
+            .SelectMany(g => g.Extensions)
+            .Where(e => e.IsChecked)
+            .Select(e => e.Extension)
+            .ToList();
+
+        foreach (var group in FileTypeGroups)
+        {
+            foreach (var e in group.Extensions) e.SetChecked(false);
+            group.NotifyAllCheckedRefreshed();
+        }
+        RefreshFilter();
+        StatusText = "Delete mode — check extensions to remove, then click \"Delete from folder…\".";
+    }
+
+    private void ExitDeleteMode()
+    {
+        if (_preDeleteModeCheckedExtensions is not null)
+        {
+            var set = new HashSet<string>(_preDeleteModeCheckedExtensions, StringComparer.OrdinalIgnoreCase);
+            foreach (var group in FileTypeGroups)
+            {
+                foreach (var e in group.Extensions) e.SetChecked(set.Contains(e.Extension));
+                group.NotifyAllCheckedRefreshed();
+            }
+            RefreshFilter();
+        }
+        _preDeleteModeCheckedExtensions = null;
+        StatusText = string.Empty;
+    }
+
+
+    // ── Scan-for-tags worker (videos for this milestone) ─────────────────────
+
+    private async void ScanForTagsAsync()
+    {
+        var selectedFiles = _allFiles.Where(f => f.IsSelected).ToList();
+        if (selectedFiles.Count == 0) return;
+        var cats = selectedFiles.Select(f => f.Category).Distinct().ToList();
+        if (cats.Count != 1) return;
+        var category = cats[0];
+        if (category != FileCategory.Video)
+        {
+            MessageBox.Show("Only video tag-scan is implemented in this build. " +
+                            "Image tag-scan is coming next.",
+                "Scan for tags", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        ScanResults.Clear();
+        ScanFilesTotal = selectedFiles.Count;
+        ScanFilesDone  = 0;
+        ScanCurrentFile = string.Empty;
+        IsScanningForTags = true;
+
+        _scanForTagsCts = new CancellationTokenSource();
+        var ct = _scanForTagsCts.Token;
+        bool autoApply = AutoApplyScanResults;
+
+        try
+        {
+            foreach (var record in selectedFiles)
+            {
+                if (ct.IsCancellationRequested) break;
+                ScanCurrentFile = record.FileName;
+
+                var hits = await ScanVideoForTagsAsync(record, ct);
+                foreach (var result in hits)
+                {
+                    if (autoApply)
+                    {
+                        ApplyMatchedTags(result.FilePath, [result.TagName]);
+                        result.IsApplied = true;
+                    }
+                    Application.Current.Dispatcher.Invoke(() => ScanResults.Add(result));
+                }
+
+                ScanFilesDone++;
+            }
+        }
+        finally
+        {
+            IsScanningForTags = false;
+            ScanCurrentFile   = string.Empty;
+            _scanForTagsCts?.Dispose();
+            _scanForTagsCts = null;
+        }
+
+        // Open the results window once the modal is dismissed.
+        Application.Current.Dispatcher.Invoke(ShowScanResultsWindow);
+    }
+
+    // Lifetime-tracked scan results window. Null when closed; we set it on
+    // first open and clear it via the window's Closed event so subsequent
+    // calls reuse the same instance if it's still up.
+    private Views.ScanResultsWindow? _scanResultsWindow;
+    private void ShowScanResultsWindow()
+    {
+        if (_scanResultsWindow is not null)
+        {
+            if (_scanResultsWindow.WindowState == WindowState.Minimized)
+                _scanResultsWindow.WindowState = WindowState.Normal;
+            _scanResultsWindow.Activate();
+            return;
+        }
+
+        _scanResultsWindow = new Views.ScanResultsWindow(this)
+        {
+            Owner = Application.Current.MainWindow,
+        };
+        _scanResultsWindow.Closed += (_, _) => _scanResultsWindow = null;
+        _scanResultsWindow.Show();
+    }
+
+    private async Task<IList<ScanResult>> ScanVideoForTagsAsync(FileRecord record, CancellationToken ct)
+    {
+        if (_frameTagStore.Frames.Count == 0) return [];
+
+        bool anyEmbeddings = _frameTagStore.Frames.Any(f => f.Embedding is { Length: > 0 });
+        var bestPerTag = new Dictionary<string, ScanResult>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            await VideoThumbnailService.ScanDeepAsync(record.FullPath, 420, ct,
+                (pos, bmp) =>
+                {
+                    var whole = PerceptualHashService.Compute(bmp);
+                    if (whole != 0)
+                    {
+                        foreach (var (tag, dist, _) in _frameTagStore.BestDistancePerTag(whole))
+                        {
+                            if (dist <= FrameTagStore.DefaultMaxDistance)
+                                ConsiderHit(tag, dist, $"dHash dist {dist}", pos, bmp, bestPerTag, record);
+                        }
+                    }
+
+                    foreach (var crop in GenerateMatchingCrops(bmp))
+                    {
+                        var ch = PerceptualHashService.Compute(crop);
+                        if (ch != 0)
+                        {
+                            foreach (var (tag, dist, _) in _frameTagStore.BestDistancePerTag(ch))
+                            {
+                                if (dist <= FrameTagStore.DefaultCropMaxDistance)
+                                    ConsiderHit(tag, dist, $"crop dHash dist {dist}", pos, bmp, bestPerTag, record);
+                            }
+                        }
+                        if (anyEmbeddings)
+                        {
+                            var emb = _suggestionService.GetEmbeddingFromCrop(crop);
+                            if (emb is not null)
+                                foreach (var (tag, sim, _) in _frameTagStore.BestSimilarityPerTag(emb))
+                                {
+                                    if (sim >= FrameTagStore.DefaultCosineThreshold)
+                                        ConsiderHit(tag, 1000.0 - sim, $"cosine {sim:F3}", pos, bmp, bestPerTag, record);
+                                }
+                        }
+                    }
+                });
+        }
+        catch { /* per-file scan failures are non-fatal */ }
+
+        return bestPerTag.Values.ToList();
+    }
+
+    private static void ConsiderHit(
+        string tag, double strength, string label, TimeSpan pos, BitmapSource bmp,
+        Dictionary<string, ScanResult> bestPerTag, FileRecord record)
+    {
+        if (bestPerTag.TryGetValue(tag, out var existing) && existing.MatchStrength <= strength)
+            return;
+
+        // Encode the matching frame as PNG bytes immediately. We do this here
+        // — while the bmp's pixel buffer is still alive on the scan thread —
+        // rather than holding a BitmapSource reference, because the ffmpeg
+        // pipe that fed bmp gets torn down at end of scan and any reference
+        // we kept goes blank when the results window reopens.
+        var thumbPng = EncodeThumbnailPng(bmp, maxWidth: 320);
+
+        bestPerTag[tag] = new ScanResult
+        {
+            FilePath           = record.FullPath,
+            FileName           = record.FileName,
+            TagName            = tag,
+            MatchedAt          = pos,
+            MatchStrength      = strength,
+            MatchStrengthLabel = label,
+            ThumbnailPng       = thumbPng,
+        };
+    }
+
+    /// <summary>
+    /// Encodes a BitmapSource to PNG bytes for persistent thumbnail storage,
+    /// capped at MaxWidth so the JSON file doesn't bloat. Returns null on failure.
+    /// </summary>
+    private static byte[]? EncodeThumbnailPng(BitmapSource? src, int maxWidth = 200)
+    {
+        if (src is null) return null;
+        try
+        {
+            BitmapSource toEncode = src;
+            if (src.PixelWidth > maxWidth)
+            {
+                double scale = maxWidth / (double)src.PixelWidth;
+                var scaled = new TransformedBitmap(src, new ScaleTransform(scale, scale));
+                scaled.Freeze();
+                toEncode = scaled;
+            }
+
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(toEncode));
+            using var ms = new MemoryStream();
+            encoder.Save(ms);
+            return ms.ToArray();
+        }
+        catch { return null; }
+    }
+
+    // Generates crops at four relative sizes (75%, 50%, 33%, 20% of the image)
+    // each placed at multiple positions across a grid. Covers small faces,
+    // medium objects, and large regions without exploding the search space.
+    private static IEnumerable<BitmapSource> GenerateMatchingCrops(BitmapSource src)
+    {
+        int W = src.PixelWidth;
+        int H = src.PixelHeight;
+        if (W < 32 || H < 32) yield break;
+
+        // (fraction, grid steps per axis) — denser sampling at smaller sizes
+        // since that's where faces and logos typically live.
+        var passes = new (double Frac, int Steps)[]
+        {
+            (0.75, 2),
+            (0.50, 3),
+            (0.33, 4),
+            (0.20, 4),
+        };
+
+        foreach (var (frac, steps) in passes)
+        {
+            int cw = (int)(W * frac);
+            int ch = (int)(H * frac);
+            if (cw < 24 || ch < 24) continue;
+
+            for (int gy = 0; gy < steps; gy++)
+            for (int gx = 0; gx < steps; gx++)
+            {
+                int cx = steps > 1 ? gx * (W - cw) / (steps - 1) : (W - cw) / 2;
+                int cy = steps > 1 ? gy * (H - ch) / (steps - 1) : (H - ch) / 2;
+                cx = Math.Clamp(cx, 0, W - cw);
+                cy = Math.Clamp(cy, 0, H - ch);
+                yield return new CroppedBitmap(src, new System.Windows.Int32Rect(cx, cy, cw, ch));
+            }
+        }
+    }
+
+
+    private void OpenSelectedLocation()
+    {
+        // Prefer the selection (single row), otherwise fall back to the
+        // currently-previewed file.
+        var target = _allFiles.FirstOrDefault(f => f.IsSelected) ?? SelectedFile;
+        if (target is null) return;
+        OpenInExplorer(target.FullPath);
+    }
+
+    public static void OpenInExplorer(string path)
+    {
+        try
+        {
+            // Quotes around the path so spaces and commas don't get split.
+            var psi = new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"")
+            {
+                UseShellExecute = true,
+            };
+            Process.Start(psi);
+        }
+        catch { /* best-effort */ }
+    }
+
+    private void OpenTagManagement()
+    {
+        var win = new Views.TagManagementWindow(_frameTagStore)
+        {
+            Owner = Application.Current.MainWindow
+        };
+        win.Show();
+    }
+
+    public void ApplyScanResult(ScanResult result)
+    {
+        if (result.IsApplied) return;
+        ApplyMatchedTags(result.FilePath, [result.TagName]);
+        result.IsApplied = true;
+    }
+
+    // Persist matches + update the live grid if the file happens to be loaded.
+    private void ApplyMatchedTags(string path, IList<string> tagNames)
+    {
+        foreach (var name in tagNames)
+        {
+            var def = _tagStore.GetOrCreate(name);
+            _tagStore.AssignTag(path, def.Name);
+
+            var record = _allFiles.FirstOrDefault(f =>
+                string.Equals(f.FullPath, path, StringComparison.OrdinalIgnoreCase));
+            if (record is not null && !record.Tags.Any(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                record.Tags.Add(def);
+
+            if (!AllTags.Contains(def)) AllTags.Add(def);
+
+            // Surface any brand-new tag name in the Tags column-filter popup
+            // without a full _allFiles rebuild. ObservableCollection raises
+            // CollectionChanged, so an open popup updates live.
+            TagsColumnFilter.MaybeAddValue(def.Name);
+        }
+    }
+
+    private async void DeleteByExtensions()
+    {
+        var checkedExts = FileTypeGroups.SelectMany(g => g.Extensions)
+                                        .Where(e => e.IsChecked)
+                                        .Select(e => e.Extension.ToLowerInvariant())
+                                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (checkedExts.Count == 0)
+        {
+            MessageBox.Show("Check at least one file extension to delete.",
+                "Delete mode", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        // Use whatever folder is already in the sidebar — no picker prompt.
+        var folder = FolderPath?.Trim();
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+        {
+            MessageBox.Show(
+                "Set a folder in the sidebar first (type a path or use the “…” browse button).",
+                "Delete mode", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        StatusText = $"Enumerating {string.Join(", ", checkedExts.OrderBy(e => e))} under {folder}…";
+        var toDelete   = new List<string>();
+        long totalBytes = 0;
+
+        await Task.Run(() =>
+        {
+            foreach (var path in SafeEnumerateFiles(folder))
+            {
+                // GetEffectiveExtension recognises PhotoRec-style names
+                // (e.g. "f0002227_memdiag_exe" → ".exe").
+                if (!checkedExts.Contains(FileTypeDetector.GetEffectiveExtension(path))) continue;
+                toDelete.Add(path);
+                try { totalBytes += new FileInfo(path).Length; } catch { }
+            }
+        });
+
+        if (toDelete.Count == 0)
+        {
+            MessageBox.Show($"No matching files found under:\n{folder}",
+                "Delete mode", MessageBoxButton.OK, MessageBoxImage.Information);
+            StatusText = string.Empty;
+            return;
+        }
+
+        var examples = toDelete.Take(3).Select(Path.GetFileName).ToList();
+        var msg =
+            $"Move {toDelete.Count:N0} file(s) to the Recycle Bin?\n\n" +
+            $"Folder:      {folder}\n" +
+            $"Extensions:  {string.Join(", ", checkedExts.OrderBy(e => e))}\n" +
+            $"Total size:  {FormatBytes(totalBytes)}\n" +
+            $"Examples:    {string.Join(", ", examples)}\n\n" +
+            "Files can be restored from the Recycle Bin.";
+
+        var answer = MessageBox.Show(msg, "Confirm delete by type",
+            MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+        if (answer != MessageBoxResult.Yes) return;
+
+        // Batched recycle-bin delete + sync the in-memory list (in case the
+        // user is deleting from the same folder they previously scanned).
+        IsDeleting     = true;
+        DeleteProgress = 0;
+
+        const int chunkSize = 500;
+        int   deleted = 0;
+        var   errors  = new List<string>();
+        var   pathSet = toDelete.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            await Task.Run(() =>
+            {
+                for (int i = 0; i < toDelete.Count; i += chunkSize)
+                {
+                    var chunk = toDelete.Skip(i).Take(chunkSize).ToList();
+                    try
+                    {
+                        SendManyToRecycleBin(chunk);
+                        deleted += chunk.Count;
+                    }
+                    catch (Exception ex) { errors.Add($"Chunk @{i}: {ex.Message}"); }
+
+                    var progress = deleted / (double)toDelete.Count * 100.0;
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        DeleteProgress = progress;
+                        StatusText     = $"Deleting… {deleted:N0} of {toDelete.Count:N0}";
+                    });
+                }
+            });
+        }
+        finally
+        {
+            IsDeleting     = false;
+            DeleteProgress = 0;
+        }
+
+        // Drop any in-memory FileRecords whose paths we just deleted.
+        var goneRecords = _allFiles.Where(f => pathSet.Contains(f.FullPath)).ToList();
+        foreach (var record in goneRecords)
+        {
+            if (SelectedFile == record) SelectedFile = null;
+            _suggestionCache.TryRemove(record.Id, out _);
+            DetachRecord(record);
+            _allFiles.Remove(record);
+        }
+
+        StatusText = errors.Count == 0
+            ? $"Moved {deleted:N0} file(s) to the Recycle Bin."
+            : $"Deleted {deleted:N0}; {errors.Count} error(s). First: {errors[0]}";
+
+        OnPropertyChanged(nameof(FileCount));
+        RaiseSelectionChanged();
+    }
+
+    // Manual recursive walk that:
+    //   • catches every exception per directory (permissions, IO, path-too-long, etc.)
+    //   • skips well-known untouchable system folders by name at every level
+    // so a single bad subtree can't kill the entire enumeration.
+    private static readonly HashSet<string> SkippedFolderNames =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "System Volume Information",
+            "$RECYCLE.BIN",
+            "$Recycle.Bin",
+            "Config.Msi",
+            "Recovery",
+        };
+
+    private static IEnumerable<string> SafeEnumerateFiles(string root)
+    {
+        var stack = new Stack<string>();
+        stack.Push(root);
+
+        while (stack.Count > 0)
+        {
+            var dir = stack.Pop();
+
+            // Materialise via ToList so any lazy-throw lands inside the try.
+            List<string>? subdirs = null;
+            try { subdirs = Directory.EnumerateDirectories(dir).ToList(); } catch { }
+
+            if (subdirs is not null)
+            {
+                foreach (var sd in subdirs)
+                {
+                    var name = Path.GetFileName(sd);
+                    if (SkippedFolderNames.Contains(name)) continue;
+                    stack.Push(sd);
+                }
+            }
+
+            List<string>? files = null;
+            try { files = Directory.EnumerateFiles(dir).ToList(); } catch { }
+
+            if (files is not null)
+                foreach (var f in files)
+                    yield return f;
+        }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        const double KB = 1024;
+        if (bytes < KB)       return $"{bytes} B";
+        if (bytes < KB*KB)    return $"{bytes / KB:F1} KB";
+        if (bytes < KB*KB*KB) return $"{bytes / (KB*KB):F1} MB";
+        return $"{bytes / (KB*KB*KB):F2} GB";
+    }
+
+    // Batched SHFileOperation — pFrom is a buffer of null-terminated paths
+    // terminated by an extra null, so the OS deletes them all in one call.
+    private static void SendManyToRecycleBin(IList<string> paths)
+    {
+        if (paths.Count == 0) return;
+        var pFrom = string.Join("\0", paths) + "\0\0";
+        var op = new ShFileOpStruct
+        {
+            hwnd   = IntPtr.Zero,
+            wFunc  = FO_DELETE,
+            pFrom  = pFrom,
+            fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRM | FOF_SILENT,
+        };
+        int result = SHFileOperation(ref op);
+        if (result != 0)
+            throw new IOException($"SHFileOperation failed (0x{result:X8})");
     }
 
     // SHFileOperation — sends a file to the Recycle Bin without showing the
@@ -828,7 +1770,7 @@ public class MainViewModel : INotifyPropertyChanged
         {
             var record = _allFiles.FirstOrDefault(f => f.Id == id);
             if (record is null) continue;
-            record.PropertyChanged -= Record_PropertyChanged;
+            DetachRecord(record);
             _allFiles.Remove(record);
             _suggestionCache.TryRemove(id, out _);
         }
@@ -956,6 +1898,7 @@ public class MainViewModel : INotifyPropertyChanged
         SelectedFile.Tags.Add(tag);
 
         if (!AllTags.Contains(tag)) AllTags.Add(tag);
+        TagsColumnFilter.MaybeAddValue(tag.Name);
 
         // Remove from suggestions now that it's applied
         SuggestedTags = SuggestedTags
@@ -971,6 +1914,116 @@ public class MainViewModel : INotifyPropertyChanged
 
         // Re-add to suggestions if it would naturally be suggested
         SuggestedTags = ComputeSuggestedTags(SelectedFile);
+    }
+
+    private async void TagRegion()
+    {
+        if (SelectedFile is null || PreviewImage is null || _selectedRegion.IsEmpty) return;
+
+        var dialog = new Views.TagInputDialog(prompt: "Tag this region as:")
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (dialog.ShowDialog() != true) return;
+        var name = dialog.TagName;
+        if (string.IsNullOrWhiteSpace(name)) return;
+
+        var record = SelectedFile;
+
+        // SelectedRegion is in *oriented original* image coords (the grid is
+        // sized to those). PreviewImage may be a downscaled version of the
+        // original. Map the region into PreviewImage coords for cropping.
+        double sx = PreviewImage.PixelWidth  / Math.Max(1.0, PreviewImagePixelWidth);
+        double sy = PreviewImage.PixelHeight / Math.Max(1.0, PreviewImagePixelHeight);
+        int cx = (int)Math.Max(0, _selectedRegion.X      * sx);
+        int cy = (int)Math.Max(0, _selectedRegion.Y      * sy);
+        int cw = (int)Math.Min(_selectedRegion.Width  * sx, PreviewImage.PixelWidth  - cx);
+        int ch = (int)Math.Min(_selectedRegion.Height * sy, PreviewImage.PixelHeight - cy);
+        if (cw < 4 || ch < 4) return;
+
+        try
+        {
+            var crop = new CroppedBitmap(PreviewImage, new System.Windows.Int32Rect(cx, cy, cw, ch));
+            crop.Freeze();
+            var hash = PerceptualHashService.Compute(crop);
+
+            // Also compute a MobileFaceNet embedding so scans can identity-
+            // match the same person across photos via cosine similarity.
+            StatusText = "Computing embedding…";
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            var embedding = await _suggestionService.GetEmbeddingFromCropAsync(
+                crop, cts.Token,
+                status: msg => Application.Current.Dispatcher.Invoke(() => StatusText = msg));
+
+            if (SelectedFile?.Id != record.Id) return;
+
+            var thumb = EncodeThumbnailPng(crop);
+            _frameTagStore.Add(hash, name, record.FullPath, TimeSpan.Zero, embedding, thumb);
+            AddTag(name);
+            StatusText = embedding is null
+                ? $"Tagged region as \"{name}\" (visual hash only — embedding unavailable)."
+                : $"Tagged region as \"{name}\" with embedding.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Tag region failed: {ex.Message}";
+        }
+    }
+
+    private void TagFace(DetectedFaceVm? face)
+    {
+        if (face is null || SelectedFile is null) return;
+
+        var dialog = new Views.TagInputDialog(
+            prompt:  "Name this face:",
+            initial: face.DisplayName ?? "")
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (dialog.ShowDialog() != true) return;
+        var name = dialog.TagName;
+        if (string.IsNullOrWhiteSpace(name)) return;
+
+        // Update PersonStore so the name propagates to other images of the
+        // same face via cosine-similarity matching.
+        var person = _suggestionService.NameFace(face.Embedding, name);
+        face.Person      = person;
+        face.DisplayName = name;
+
+        // Also assign the name as a regular file tag so it shows up on the
+        // file alongside the visual frame-match / OCR tags.
+        AddTag(name);
+
+        StatusText = $"Tagged face as \"{name}\".";
+    }
+
+    private void TagFrame(VideoFrame? frame)
+    {
+        if (frame is null || SelectedFile is null) return;
+
+        var dialog = new Views.TagInputDialog(
+            prompt:  $"Tag this frame as (saves visual fingerprint at {frame.Label}):",
+            initial: "")
+        {
+            Owner = Application.Current.MainWindow
+        };
+        if (dialog.ShowDialog() != true) return;
+        var tagName = dialog.TagName;
+        if (string.IsNullOrWhiteSpace(tagName)) return;
+
+        // 1. Persist the frame's perceptual hash + tag.
+        var hash = PerceptualHashService.Compute(frame.Image);
+        if (hash != 0)
+        {
+            var thumb = EncodeThumbnailPng(frame.Image);
+            _frameTagStore.Add(hash, tagName, SelectedFile.FullPath, frame.Position, thumbnailPng: thumb);
+        }
+
+        // 2. Also assign the tag to the current file via the existing tag system,
+        //    so the visual tag immediately shows up on the file too.
+        AddTag(tagName);
+
+        StatusText = $"Tagged frame at {frame.Label} as \"{tagName}\".";
     }
 
     private void CreateAndAddTag()
@@ -1081,7 +2134,13 @@ public class MainViewModel : INotifyPropertyChanged
                 return false;
         }
 
-        if (FileTypeGroups.Any(g => g.Extensions.Any(e => !e.IsChecked)))
+        // Extension filter applies only when the user has a partial selection
+        // (some but not all extensions checked). Zero-checked is treated as
+        // "no filter intent" — same convention as StartScan — so the grid
+        // doesn't go blank when the user clicks "Deselect all".
+        int checkedExts = FileTypeGroups.Sum(g => g.Extensions.Count(e => e.IsChecked));
+        int totalExts   = FileTypeGroups.Sum(g => g.Extensions.Count);
+        if (checkedExts > 0 && checkedExts < totalExts)
         {
             var allowed = FileTypeGroups
                 .SelectMany(g => g.Extensions.Where(e => e.IsChecked).Select(e => e.Extension))
@@ -1095,12 +2154,40 @@ public class MainViewModel : INotifyPropertyChanged
             if (!allowed.Contains(r.ImageGroup)) return false;
         }
 
+        // Per-column filters from the grid header dropdowns. Each is a no-op
+        // (returns true immediately) when no values have been unchecked.
+        if (!ExtColumnFilter.IsAllowed(r.Extension))           return false;
+        if (!CategoryColumnFilter.IsAllowed(r.Category.ToString())) return false;
+        if (!TagsColumnFilter.IsAnyAllowed(r.Tags.Select(t => t.Name))) return false;
+
         return true;
     }
 
-    public void RefreshFilter() => FileView.Refresh();
+    /// <summary>
+    /// Re-evaluate the FileView filter. Before refreshing, drops the selection
+    /// for any record the new filter hides — otherwise hidden-but-selected rows
+    /// would still be picked up by Move / Rename / Delete / Apply-tag operations
+    /// (and silently rename or tag the wrong files, which is exactly what the
+    /// "I named everything wrong" bug looked like).
+    /// </summary>
+    public void RefreshFilter()
+    {
+        foreach (var r in _allFiles)
+        {
+            if (r.IsSelected && !ApplyFilter(r))
+                r.IsSelected = false;
+        }
+        FileView.Refresh();
+    }
 
     // ── Sorting ───────────────────────────────────────────────────────────────
+
+    /// <summary>True when an active SortDescription is on the FileView. Drives
+    /// the visibility / enabled state of the "Clear sort" button. Uses the
+    /// view's actual SortDescriptions count rather than the SortColumn field
+    /// so the button doesn't appear-and-do-nothing on a fresh session before
+    /// the user has clicked any header.</summary>
+    public bool IsSorted => FileView.SortDescriptions.Count > 0;
 
     private void ApplySort(string column)
     {
@@ -1120,6 +2207,33 @@ public class MainViewModel : INotifyPropertyChanged
         FileView.SortDescriptions.Add(new SortDescription(SortColumn, SortDirection));
         OnPropertyChanged(nameof(SortColumn));
         OnPropertyChanged(nameof(SortDirection));
+        OnPropertyChanged(nameof(IsSorted));
+    }
+
+    private void ClearSort()
+    {
+        FileView.SortDescriptions.Clear();
+        SortColumn = string.Empty;
+        OnPropertyChanged(nameof(SortColumn));
+        OnPropertyChanged(nameof(SortDirection));
+        OnPropertyChanged(nameof(IsSorted));
+    }
+
+    /// <summary>True when at least one extension across all FileTypeGroups is
+    /// unchecked. Drives the "Select all" / "Deselect all" label on the toggle.</summary>
+    public bool HasUncheckedFileType =>
+        FileTypeGroups.Any(g => g.Extensions.Any(e => !e.IsChecked));
+
+    private void ToggleAllFileTypes()
+    {
+        bool target = HasUncheckedFileType;   // if anything is off → turn all on
+        foreach (var group in FileTypeGroups)
+        {
+            foreach (var e in group.Extensions) e.SetChecked(target);
+            group.NotifyAllCheckedRefreshed();
+        }
+        OnPropertyChanged(nameof(HasUncheckedFileType));
+        RefreshFilter();
     }
 
     // ── Preview ──────────────────────────────────────────────────────────────
@@ -1136,9 +2250,12 @@ public class MainViewModel : INotifyPropertyChanged
         ShowImagePreview    = false;
         ShowVideoPreview    = false;
         ShowDocumentPreview = false;
+        ShowTextPreview     = false;
+        TextPreviewContent  = string.Empty;
         PreviewFilePath     = null;
         IsDeepScanning      = false;
         ThumbnailStrip.Clear();
+        DetectedFaces.Clear();
         _timelineValue = 0;
         OnPropertyChanged(nameof(TimelineValue));
         OnPropertyChanged(nameof(TimelineLabel));
@@ -1155,25 +2272,50 @@ public class MainViewModel : INotifyPropertyChanged
             _thumbCts = cts;
             var ct = cts.Token;
 
-            // ── Quick scan: 6 positions → populate thumbnail strip ────────────
             BitmapSource? firstFrame = null;
-            await VideoThumbnailService.GetQuickFramesAsync(
-                record.FullPath, 420, ct,
-                (pos, bmp) => Application.Current.Dispatcher.Invoke(() =>
-                {
-                    if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
-                    var isFirst = ThumbnailStrip.Count == 0;
-                    var frame   = new VideoFrame(bmp, pos) { IsSelected = isFirst };
-                    ThumbnailStrip.Add(frame);
-                    if (isFirst)
-                    {
-                        firstFrame       = bmp;
-                        PreviewImage     = bmp;
-                        ShowVideoPreview = true;
-                    }
-                }));
 
-            if (ct.IsCancellationRequested) return;
+            // ── Cache hit: restore the previously-scanned strip without rescanning ──
+            if (_scanCache.TryGetValue(record.FullPath, out var cached) && cached.Count > 0)
+            {
+                bool first = true;
+                foreach (var f in cached)
+                {
+                    f.IsSelected = first;
+                    ThumbnailStrip.Add(f);
+                    if (first)
+                    {
+                        firstFrame       = f.Image;
+                        PreviewImage     = f.Image;
+                        ShowVideoPreview = true;
+                        first            = false;
+                    }
+                }
+            }
+            else
+            {
+                // ── Quick scan: populate thumbnail strip ──────────────────────
+                await VideoThumbnailService.GetQuickFramesAsync(
+                    record.FullPath, 420, ct,
+                    (pos, bmp) => Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
+                        var isFirst = ThumbnailStrip.Count == 0;
+                        var frame   = new VideoFrame(bmp, pos) { IsSelected = isFirst };
+                        ThumbnailStrip.Add(frame);
+                        if (isFirst)
+                        {
+                            firstFrame       = bmp;
+                            PreviewImage     = bmp;
+                            ShowVideoPreview = true;
+                        }
+                    }));
+
+                if (ct.IsCancellationRequested) return;
+
+                // Cache the quick-scan result.
+                if (ThumbnailStrip.Count > 0)
+                    _scanCache[record.FullPath] = ThumbnailStrip.ToList();
+            }
 
             // OCR first captured frame for title-card text
             if (firstFrame is not null)
@@ -1213,32 +2355,135 @@ public class MainViewModel : INotifyPropertyChanged
         }
         else if (record.Category == FileCategory.Image)
         {
+            var faceCts = new CancellationTokenSource();
+            _thumbCts   = faceCts;   // reused as the image-preview cancel slot
+            var faceCt  = faceCts.Token;
+
             _ = Task.Run(() =>
             {
                 try
                 {
-                    var bmp = new BitmapImage();
-                    bmp.BeginInit();
-                    bmp.UriSource        = new Uri(record.FullPath);
-                    bmp.DecodePixelWidth = 420;
-                    bmp.CacheOption      = BitmapCacheOption.OnLoad;
-                    bmp.CreateOptions    = BitmapCreateOptions.IgnoreImageCache;
-                    bmp.EndInit();
-                    bmp.Freeze();
+                    // Load with EXIF orientation applied so the preview matches
+                    // what face detection sees (and so phone-portrait photos
+                    // aren't displayed sideways).
+                    var oriented = FaceRecognitionService.LoadOrientedBitmap(record.FullPath);
+                    int origW = oriented.PixelWidth;
+                    int origH = oriented.PixelHeight;
+
+                    // Downscale large photos for the preview to keep RAM bounded.
+                    double scale = origW > 1280 ? 1280.0 / origW : 1.0;
+                    BitmapSource preview = scale < 1.0
+                        ? new TransformedBitmap(oriented, new System.Windows.Media.ScaleTransform(scale, scale))
+                        : oriented;
+                    if (!preview.IsFrozen) preview.Freeze();
 
                     Application.Current.Dispatcher.Invoke(() =>
                     {
-                        PreviewImage     = bmp;
-                        ShowImagePreview = true;
+                        if (SelectedFile?.Id != record.Id) return;
+                        PreviewImage            = preview;
+                        PreviewImagePixelWidth  = origW;
+                        PreviewImagePixelHeight = origH;
+                        ShowImagePreview        = true;
                     });
                 }
                 catch { }
             });
+
+            // Detect & match faces on a worker, then post DetectedFaceVm's to the UI.
+            // AnalyzeFacesAsync now lazily downloads + initialises the ONNX models
+            // on first use, so we don't need a prior scan to have completed.
+            _ = Task.Run(async () =>
+            {
+                if (faceCt.IsCancellationRequested) return;
+                try
+                {
+                    Application.Current.Dispatcher.Invoke(() => StatusText = "Detecting faces…");
+                    var faces = await _suggestionService.AnalyzeFacesAsync(
+                        record.FullPath, faceCt,
+                        status: msg => Application.Current.Dispatcher.Invoke(() => StatusText = msg));
+                    if (faceCt.IsCancellationRequested) return;
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        if (SelectedFile?.Id != record.Id) return;
+                        DetectedFaces.Clear();
+                        foreach (var f in faces)
+                        {
+                            DetectedFaces.Add(new DetectedFaceVm
+                            {
+                                X           = f.Box.X,
+                                Y           = f.Box.Y,
+                                Width       = f.Box.Width,
+                                Height      = f.Box.Height,
+                                Embedding   = f.Embedding,
+                                Person      = f.MatchedPerson,
+                                DisplayName = f.MatchedPerson?.Name,
+                            });
+                        }
+                        StatusText = faces.Count > 0
+                            ? $"Detected {faces.Count} face(s) — right-click a box to tag."
+                            : "No faces detected in this image.";
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Application.Current.Dispatcher.Invoke(() =>
+                        StatusText = $"Face detection error: {ex.Message}");
+                }
+            }, faceCt);
         }
-        else if (record.Category == FileCategory.Document)
+        else if (record.Category == FileCategory.Document || record.Category == FileCategory.Code)
         {
-            PreviewFilePath     = record.FullPath;
-            ShowDocumentPreview = true;
+            if (IsTextLikeExtension(record.Extension))
+            {
+                // Read inline — bypass the Shell preview handler entirely.
+                TextPreviewContent = ReadTextPreview(record.FullPath);
+                ShowTextPreview    = true;
+            }
+            else
+            {
+                PreviewFilePath     = record.FullPath;
+                ShowDocumentPreview = true;
+            }
+        }
+    }
+
+    private static readonly HashSet<string> TextLikeExtensions =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".txt", ".log", ".md", ".markdown", ".csv", ".tsv",
+            ".json", ".xml", ".html", ".htm", ".css", ".js", ".ts",
+            ".yaml", ".yml", ".ini", ".conf", ".cfg", ".toml",
+            ".py", ".rb", ".pl", ".sh", ".bat", ".ps1",
+            ".c", ".cpp", ".h", ".hpp", ".cs", ".java", ".kt",
+            ".go", ".rs", ".swift", ".sql", ".r",
+        };
+
+    private static bool IsTextLikeExtension(string ext) =>
+        !string.IsNullOrEmpty(ext) && TextLikeExtensions.Contains(ext);
+
+    // Hard cap so a stray 2 GB log file doesn't OOM the preview panel. Anything
+    // past the limit gets truncated with a marker line so the user knows.
+    private const int TextPreviewByteLimit = 256 * 1024;
+
+    private static string ReadTextPreview(string path)
+    {
+        try
+        {
+            using var fs = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            long total = fs.Length;
+            int  toRead = (int)Math.Min(total, TextPreviewByteLimit);
+            var buf = new byte[toRead];
+            int read = fs.Read(buf, 0, toRead);
+            // System.Text.Encoding.UTF8 with a permissive decoder fallback would
+            // mangle non-UTF8 files; UTF8 with replacement is fine for preview.
+            string content = System.Text.Encoding.UTF8.GetString(buf, 0, read);
+            if (total > toRead)
+                content += $"\n\n── truncated — showing first {toRead / 1024} KB of {total / 1024} KB ──";
+            return content;
+        }
+        catch (Exception ex)
+        {
+            return $"(Could not read file: {ex.Message})";
         }
     }
 
@@ -1277,6 +2522,11 @@ public class MainViewModel : INotifyPropertyChanged
             StatusText = added > 0
                 ? $"Deep scan complete — {added} frame{(added == 1 ? "" : "s")} added."
                 : "Deep scan: no additional frames found.";
+
+            // Update the in-memory cache so revisiting this file restores the
+            // post-deep-scan strip without rescanning.
+            if (ThumbnailStrip.Count > 0)
+                _scanCache[record.FullPath] = ThumbnailStrip.ToList();
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { StatusText = $"Deep scan failed: {ex.Message}"; }
@@ -1292,56 +2542,211 @@ public class MainViewModel : INotifyPropertyChanged
 
     private async void IdentifyEpisodeAsync()
     {
-        if (PreviewImage is null || SelectedFile is null) return;
+        if (SelectedFile is null) return;
 
         IsIdentifying = true;
+
+        var record    = SelectedFile;
+        var stripSnap = ThumbnailStrip.ToList();
         StatusText    = "Identifying...";
 
-        var record = SelectedFile;
-        var frame  = PreviewImage;
-
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var ct = cts.Token;
 
         try
         {
+            // ── Embedded container metadata + subtitles (free, local, fast) ──
+            // For ripped media these are by far the highest-signal sources:
+            // MakeMKV/Handbrake tags carry the title, and embedded subs
+            // reveal show identifiers without any frame decoding.
+            var metaTask    = FfmpegMetadataService.ReadMetadataAsync(record.FullPath, ct);
+            var subsTask    = FfmpegMetadataService.ExtractSubtitleCuesAsync(record.FullPath, 20, ct);
+
+            // ── OCR every cached frame in parallel ──────────────────────────
+            // Aggregating across the whole strip catches title cards, crawl
+            // text, captions, and disambiguating info wherever they appear.
+            var ocrTasks = stripSnap
+                .Select(f => Task.Run(() => VideoTitleOcrService.ScanAllTextAsync(f.Image, ct), ct))
+                .ToArray();
+            var perFrameLines = ocrTasks.Length > 0 ? await Task.WhenAll(ocrTasks) : [];
+
+            var meta = await metaTask;
+            var subs = await subsTask;
+
+            // Aggregate unique lines preserving first-seen order. OCR within a
+            // frame is already sorted largest-font-first, which surfaces title
+            // text ahead of crawl paragraphs.
+            var aggLines = new List<string>();
+            var seen     = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var lines in perFrameLines)
+                foreach (var line in lines)
+                    if (seen.Add(line)) aggLines.Add(line);
+
             var results = new List<SuggestionResult>();
 
-            // ── OCR — always runs, no key needed ────────────────────────────
-            var ocrLines = await Task.Run(
-                () => VideoTitleOcrService.ScanAllTextAsync(frame, ct), ct);
-            if (ocrLines.Count > 0)
+            // ── Container metadata title (highest signal when present) ───────
+            // ffmpeg labels chapter timestamps with key "title" too; require
+            // it to contain a letter so we don't pick up "00:00:09.259".
+            if (meta.TryGetValue("title", out var metaTitle)
+                && !string.IsNullOrWhiteSpace(metaTitle)
+                && metaTitle.Any(char.IsLetter))
             {
                 results.Add(new SuggestionResult(
-                    SuggestedName:   string.Join("  •  ", ocrLines.Take(5)),
+                    SuggestedName:   metaTitle.Trim(),
+                    SuggestedFolder: null,
+                    Confidence:      0.95f,
+                    Source:          "metadata"));
+            }
+
+            // ── Embedded subtitle cues ───────────────────────────────────────
+            if (subs.Count > 0)
+            {
+                results.Add(new SuggestionResult(
+                    SuggestedName:   string.Join("  •  ", subs.Take(3)),
+                    SuggestedFolder: null,
+                    Confidence:      0.55f,
+                    Source:          "subtitles"));
+            }
+
+            // ── OpenSubtitles hash lookup (highest-confidence signal) ────────
+            // OSDB hash + XML-RPC lookup. No API key needed; rate-limited via
+            // the "TemporaryUserAgent" anonymous identity.
+            try
+            {
+                StatusText = "Looking up file hash on OpenSubtitles...";
+                var hash = await Task.Run(() => OsdbHashService.Compute(record.FullPath), ct);
+                if (hash is not null)
+                {
+                    var match = await OpenSubtitlesService.LookupByHashAsync(hash, ct);
+                    if (match is not null)
+                    {
+                        string name = (match.Season is not null && match.Episode is not null)
+                            ? $"{match.MovieName} S{match.Season:D2}E{match.Episode:D2}"
+                            : match.Year is not null
+                                ? $"{match.MovieName} ({match.Year})"
+                                : match.MovieName!;
+                        string folder = match.Kind == "episode" && match.Season is not null
+                            ? $"{match.MovieName}\\Season {match.Season:D2}\\"
+                            : "Movies\\";
+                        results.Add(new SuggestionResult(
+                            SuggestedName:   name,
+                            SuggestedFolder: folder,
+                            Confidence:      0.98f,
+                            Source:          "opensubtitles"));
+                    }
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { /* OpenSubtitles XML-RPC is best-effort */ }
+
+            if (aggLines.Count > 0)
+            {
+                results.Add(new SuggestionResult(
+                    SuggestedName:   string.Join("  •  ", aggLines.Take(5)),
                     SuggestedFolder: null,
                     Confidence:      0.45f,
                     Source:          "ocr"));
             }
 
-            // ── Reverse image search — no key needed ─────────────────────────
-            var imgQuery = await Task.Run(
-                () => ReverseImageSearchService.SearchAsync(frame, ct), ct);
-            if (imgQuery is not null)
+            // ── Frame-match tags (visual fingerprint propagation) ────────────
+            // Compute the dHash of every cached strip frame, look each up
+            // against the user's tagged-frame library, and surface every tag
+            // that has a visually-similar saved frame.
+            if (stripSnap.Count > 0 && _frameTagStore.Frames.Count > 0)
             {
-                results.Add(new SuggestionResult(
-                    SuggestedName:   imgQuery,
-                    SuggestedFolder: null,
-                    Confidence:      0.65f,
-                    Source:          "image-search"));
+                var matched = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                await Task.Run(() =>
+                {
+                    foreach (var f in stripSnap)
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        var hash = PerceptualHashService.Compute(f.Image);
+                        if (hash == 0) continue;
+                        foreach (var tag in _frameTagStore.Match(hash))
+                            matched.Add(tag);
+                    }
+                }, ct);
+
+                foreach (var tag in matched)
+                {
+                    results.Add(new SuggestionResult(
+                        SuggestedName:   tag,
+                        SuggestedFolder: null,
+                        Confidence:      0.80f,
+                        Source:          "frame-match"));
+                }
             }
 
-            // ── Vision + TMDB — optional, only when keys are configured ──────
-            if (!string.IsNullOrWhiteSpace(_appSettings.GoogleVisionKey))
+            if (stripSnap.Count > 0)
             {
-                try
+                // Best Vision candidate: the frame with the most extracted text
+                // (likely a title card or info-rich frame). Falls back to frame 0.
+                int bestIdx = 0, bestLen = 0;
+                for (int i = 0; i < perFrameLines.Length; i++)
                 {
-                    var visionResults = await Task.Run(
-                        () => EpisodeIdentifier.IdentifyAsync(frame, _appSettings, ct), ct);
-                    results.AddRange(visionResults);
+                    int len = perFrameLines[i].Sum(l => l.Length);
+                    if (len > bestLen) { bestLen = len; bestIdx = i; }
                 }
-                catch (OperationCanceledException) { throw; }
-                catch { /* Vision is optional enrichment */ }
+                var visionFrame = stripSnap[bestIdx].Image;
+
+                // ── Tesseract OCR on sampled frames ─────────────────────────
+                // Tesseract handles stylized fonts (yellow-on-black title
+                // cards, perspective text, etc.) better than Windows.Media.Ocr.
+                // It's CPU-heavy so we sample evenly across the strip.
+                if (TesseractOcrService.IsAvailable)
+                {
+                    StatusText = "Running Tesseract OCR on sampled frames...";
+                    const int MaxTessFrames = 20;
+                    int step = Math.Max(1, stripSnap.Count / MaxTessFrames);
+                    var sampled = new List<VideoFrame>();
+                    for (int i = 0; i < stripSnap.Count; i += step)
+                        sampled.Add(stripSnap[i]);
+
+                    var tessTasks = sampled
+                        .Select(f => TesseractOcrService.ScanLinesAsync(f.Image, ct))
+                        .ToArray();
+                    var tessResults = await Task.WhenAll(tessTasks);
+                    var tessLines = new List<string>();
+                    foreach (var lines in tessResults)
+                        foreach (var line in lines)
+                            if (seen.Add(line)) { tessLines.Add(line); aggLines.Add(line); }
+
+                    if (tessLines.Count > 0)
+                    {
+                        results.Add(new SuggestionResult(
+                            SuggestedName:   string.Join("  •  ", tessLines.Take(5)),
+                            SuggestedFolder: null,
+                            Confidence:      0.50f,
+                            Source:          "tesseract"));
+                    }
+                }
+
+                StatusText = "Looking up identifying info...";
+
+                // ── Reverse image search — no key needed ─────────────────────
+                var imgQuery = await Task.Run(
+                    () => ReverseImageSearchService.SearchAsync(visionFrame, ct), ct);
+                if (imgQuery is not null)
+                {
+                    results.Add(new SuggestionResult(
+                        SuggestedName:   imgQuery,
+                        SuggestedFolder: null,
+                        Confidence:      0.65f,
+                        Source:          "image-search"));
+                }
+
+                // ── Vision + TMDB — optional, only when keys are configured ──
+                if (!string.IsNullOrWhiteSpace(_appSettings.GoogleVisionKey))
+                {
+                    try
+                    {
+                        var visionResults = await Task.Run(
+                            () => EpisodeIdentifier.IdentifyAsync(visionFrame, aggLines, _appSettings, ct), ct);
+                        results.AddRange(visionResults);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch { /* Vision is optional enrichment */ }
+                }
             }
 
             if (SelectedFile?.Id != record.Id) return;
@@ -1349,7 +2754,8 @@ public class MainViewModel : INotifyPropertyChanged
             if (results.Count > 0)
             {
                 var replaced = new HashSet<string>
-                    { "ocr", "image-search", "vision", "vision+tmdb" };
+                    { "metadata", "subtitles", "opensubtitles", "ocr", "tesseract",
+                      "frame-match", "image-search", "vision", "vision+tmdb" };
                 CurrentSuggestions = results
                     .Concat(CurrentSuggestions.Where(s => !replaced.Contains(s.Source)))
                     .ToList();
@@ -1357,7 +2763,7 @@ public class MainViewModel : INotifyPropertyChanged
             }
             else
             {
-                StatusText = "No match found. Try a different frame position.";
+                StatusText = "No identifying info found across the scanned frames.";
             }
         }
         catch (OperationCanceledException) { }
@@ -1459,7 +2865,7 @@ public class MainViewModel : INotifyPropertyChanged
             if (!byCategory.TryGetValue(cat, out var exts)) continue;
 
             var group = new CategoryExtensionGroup(cat, CategoryLabel(cat),
-                onGroupChanged: () => FileView.Refresh());
+                onGroupChanged: () => RefreshFilter());
 
             foreach (var ext in exts)
                 group.AddExtension(ext);
@@ -1496,7 +2902,7 @@ public class MainViewModel : INotifyPropertyChanged
             .GroupBy(f => f.ImageGroup)
             .OrderBy(g => (int)g.Key))
         {
-            var filter = new ImageGroupFilter(g.Key, g.Count(), onChanged: () => FileView.Refresh());
+            var filter = new ImageGroupFilter(g.Key, g.Count(), onChanged: () => RefreshFilter());
             if (prevState.TryGetValue(g.Key, out var wasChecked) && !wasChecked)
                 filter.SetCheckedSilent(false);
             ImageGroupFilters.Add(filter);
@@ -1555,6 +2961,13 @@ public class CategoryExtensionGroup : INotifyPropertyChanged
             _onGroupChanged();
         }));
     }
+
+    /// <summary>
+    /// Forces the tri-state master checkbox to re-evaluate its IsChecked
+    /// binding after a bulk SetChecked() pass on individual extensions.
+    /// </summary>
+    public void NotifyAllCheckedRefreshed() =>
+        RaisePropertyChanged(nameof(IsAllChecked));
 
     public CategoryExtensionGroup(FileCategory category, string label, Action onGroupChanged)
     { Category = category; Label = label; _onGroupChanged = onGroupChanged; }

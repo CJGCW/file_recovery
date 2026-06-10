@@ -60,6 +60,16 @@ public class BoolToVisibilityConverter : IValueConverter
         => value is Visibility.Visible;
 }
 
+/// <summary>Inverts a bool. Useful for IsEnabled bindings.</summary>
+public class InverseBoolConverter : IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        => value is true ? false : true;
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => value is true ? false : true;
+}
+
 /// <summary>Returns Visibility.Visible when the bound bool is false (inverted).</summary>
 public class InverseBoolToVisibilityConverter : IValueConverter
 {
@@ -136,3 +146,20 @@ public class DurationConverter : IValueConverter
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         => throw new NotImplementedException();
 }
+
+/// <summary>
+/// Picks one of two brushes by a bool. Used to tint the column-filter
+/// chevron purple when its filter is active and grey otherwise.
+/// </summary>
+public class BoolToBrushConverter : IValueConverter
+{
+    public Brush TrueBrush  { get; set; } = Brushes.White;
+    public Brush FalseBrush { get; set; } = Brushes.Gray;
+
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        => value is true ? TrueBrush : FalseBrush;
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}
+
