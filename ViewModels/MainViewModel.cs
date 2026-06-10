@@ -144,13 +144,11 @@ public class MainViewModel : INotifyPropertyChanged
                                                   _ => IsScanning || _isSearching);
         SortCommand            = new RelayCommand(col => ApplySort(col as string ?? string.Empty));
         ClearCommand           = new RelayCommand(_ => ClearResults(), _ => _allFiles.Count > 0);
-        SelectAllCommand       = new RelayCommand(_ => ToggleSelectAll());
         MoveCommand            = new RelayCommand(_ => ExecuteMove(),   _ => SelectedCount > 0);
         RenameCommand          = new RelayCommand(_ => ExecuteRename(), _ => SelectedCount > 0);
         DeleteCommand          = new RelayCommand(_ => ExecuteDelete(), _ => SelectedCount > 0);
         OpenLocationCommand    = new RelayCommand(_ => OpenSelectedLocation(),
                                        _ => SelectedFile is not null || SelectedCount == 1);
-        ToggleDeleteModeCommand = new RelayCommand(_ => IsDeleteMode = !IsDeleteMode);
         DeleteByExtensionsCommand = new RelayCommand(_ => DeleteByExtensions(),
                                        _ => IsDeleteMode && FileTypeGroups.SelectMany(g => g.Extensions).Any(e => e.IsChecked));
         ScanForTagsCommand     = new RelayCommand(_ => ScanForTagsAsync(),
@@ -748,14 +746,12 @@ public class MainViewModel : INotifyPropertyChanged
     public ICommand CancelCommand          { get; }
     public ICommand SortCommand            { get; }
     public ICommand ClearCommand           { get; }
-    public ICommand SelectAllCommand       { get; }
     public ICommand MoveCommand            { get; }
     public ICommand RenameCommand          { get; }
     public ICommand ApplySuggestionCommand       { get; }
     public ICommand TogglePreviewMaximizeCommand { get; }
     public ICommand DeleteCommand                { get; }
     public ICommand OpenLocationCommand          { get; }
-    public ICommand ToggleDeleteModeCommand      { get; }
     public ICommand DeleteByExtensionsCommand    { get; }
     public ICommand ScanForTagsCommand           { get; }
     public ICommand CancelScanForTagsCommand     { get; }
@@ -981,16 +977,6 @@ public class MainViewModel : INotifyPropertyChanged
         SelectedFile        = null;
         OnPropertyChanged(nameof(ShowMetadata));
         OnPropertyChanged(nameof(FileCount));
-        RaiseSelectionChanged();
-    }
-
-    // ── Selection ─────────────────────────────────────────────────────────────
-
-    private void ToggleSelectAll()
-    {
-        var all = AllSelected == true;
-        foreach (var f in FileView.Cast<FileRecord>())
-            f.IsSelected = !all;
         RaiseSelectionChanged();
     }
 
@@ -1282,7 +1268,7 @@ public class MainViewModel : INotifyPropertyChanged
                         foreach (var (tag, dist, _) in _frameTagStore.BestDistancePerTag(whole))
                         {
                             if (dist <= FrameTagStore.DefaultMaxDistance)
-                                ConsiderHit(tag, dist, $"dHash dist {dist}", pos, bmp, bestPerTag, record);
+                                ConsiderHit(tag, dist, $"dHash dist {dist}", bmp, bestPerTag, record);
                         }
                     }
 
@@ -1294,7 +1280,7 @@ public class MainViewModel : INotifyPropertyChanged
                             foreach (var (tag, dist, _) in _frameTagStore.BestDistancePerTag(ch))
                             {
                                 if (dist <= FrameTagStore.DefaultCropMaxDistance)
-                                    ConsiderHit(tag, dist, $"crop dHash dist {dist}", pos, bmp, bestPerTag, record);
+                                    ConsiderHit(tag, dist, $"crop dHash dist {dist}", bmp, bestPerTag, record);
                             }
                         }
                         if (anyEmbeddings)
@@ -1304,7 +1290,7 @@ public class MainViewModel : INotifyPropertyChanged
                                 foreach (var (tag, sim, _) in _frameTagStore.BestSimilarityPerTag(emb))
                                 {
                                     if (sim >= FrameTagStore.DefaultCosineThreshold)
-                                        ConsiderHit(tag, 1000.0 - sim, $"cosine {sim:F3}", pos, bmp, bestPerTag, record);
+                                        ConsiderHit(tag, 1000.0 - sim, $"cosine {sim:F3}", bmp, bestPerTag, record);
                                 }
                         }
                     }
@@ -1316,7 +1302,7 @@ public class MainViewModel : INotifyPropertyChanged
     }
 
     private static void ConsiderHit(
-        string tag, double strength, string label, TimeSpan pos, BitmapSource bmp,
+        string tag, double strength, string label, BitmapSource bmp,
         Dictionary<string, ScanResult> bestPerTag, FileRecord record)
     {
         if (bestPerTag.TryGetValue(tag, out var existing) && existing.MatchStrength <= strength)
@@ -1334,7 +1320,6 @@ public class MainViewModel : INotifyPropertyChanged
             FilePath           = record.FullPath,
             FileName           = record.FileName,
             TagName            = tag,
-            MatchedAt          = pos,
             MatchStrength      = strength,
             MatchStrengthLabel = label,
             ThumbnailPng       = thumbPng,
@@ -2887,9 +2872,6 @@ public class MainViewModel : INotifyPropertyChanged
         FileCategory.Executable => "Executables",
         _                       => cat.ToString(),
     };
-
-    // Kept so existing callers in MainWindow.xaml.cs compile; no longer needed.
-    public void PopulateExtensionFilters() { }
 
     public void PopulateImageGroupFilters()
     {

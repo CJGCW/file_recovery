@@ -15,7 +15,6 @@
     <cv:CategoryColorConverter         x:Key="CategoryColorConverter"/>
     <cv:BoolToVisibilityConverter      x:Key="BoolToVis"/>
     <cv:InverseBoolToVisibilityConverter x:Key="InvBoolToVis"/>
-    <cv:InverseBoolConverter           x:Key="InverseBool"/>
     <cv:SortIndicatorConverter         x:Key="SortIndicator"/>
     <cv:DateConverter                  x:Key="DateConverter"/>
     <cv:DurationConverter              x:Key="DurationConverter"/>

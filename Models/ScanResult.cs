@@ -24,9 +24,6 @@ public class ScanResult : INotifyPropertyChanged
         set { _tagName = value ?? string.Empty; OnPropertyChanged(); }
     }
 
-    /// <summary>Position in the source video/file where the best match was found.</summary>
-    public TimeSpan MatchedAt { get; init; }
-
     /// <summary>Numeric score — lower for dHash (Hamming distance), higher for embedding cosine sim.</summary>
     public double MatchStrength { get; init; }
 
@@ -72,10 +69,6 @@ public class ScanResult : INotifyPropertyChanged
         get => _isApplied;
         set { _isApplied = value; OnPropertyChanged(); }
     }
-
-    public string MatchedAtLabel =>
-        MatchedAt.TotalHours >= 1 ? MatchedAt.ToString(@"h\:mm\:ss")
-                                  : MatchedAt.ToString(@"m\:ss");
 
     /// <summary>
     /// One-word bucket of how good the match is. Bridges the two underlying

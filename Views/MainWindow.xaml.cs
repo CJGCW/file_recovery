@@ -25,7 +25,6 @@ public partial class MainWindow : Window
         {
             if (e.PropertyName == nameof(MainViewModel.IsScanning) && !Vm.IsScanning)
             {
-                Vm.PopulateExtensionFilters();
                 Vm.PopulateImageGroupFilters();
                 // Rebuild column-header filter value lists from the freshly
                 // scanned data so the Ext/Type/Tags popups have something to show.
