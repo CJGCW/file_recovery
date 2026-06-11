@@ -15,6 +15,12 @@ public class FrameTagStore
     public const int DefaultCropMaxDistance = 6;   // stricter for multi-scale crops; small crops collide too often at 10
 
     private readonly string _path;
+
+    // Guards every read and write of Frames + every Save(). Tag-frame creation
+    // happens on the UI thread; scan-for-tags' ApplyMatchedTags runs on a
+    // worker thread. Without the lock, List mutation during JSON enumeration
+    // throws InvalidOperationException.
+    private readonly object _lock = new();
     public List<TaggedFrame> Frames { get; private set; } = [];
 
     public FrameTagStore()
@@ -34,66 +40,63 @@ public class FrameTagStore
     {
         if (string.IsNullOrWhiteSpace(tagName)) return;
         if (hash == 0 && embedding is null) return;
-        Frames.Add(new TaggedFrame
+        lock (_lock)
         {
-            Hash                  = hash,
-            TagName               = tagName.Trim(),
-            SourceFile            = sourceFile,
-            SourcePositionSeconds = position.TotalSeconds,
-            AddedAt               = DateTime.UtcNow,
-            Embedding             = embedding,
-            ThumbnailPng          = thumbnailPng,
-        });
-        Save();
+            Frames.Add(new TaggedFrame
+            {
+                Hash                  = hash,
+                TagName               = tagName.Trim(),
+                SourceFile            = sourceFile,
+                SourcePositionSeconds = position.TotalSeconds,
+                AddedAt               = DateTime.UtcNow,
+                Embedding             = embedding,
+                ThumbnailPng          = thumbnailPng,
+            });
+            Save();
+        }
     }
 
     public void Remove(TaggedFrame frame)
     {
-        if (Frames.Remove(frame)) Save();
+        lock (_lock) { if (Frames.Remove(frame)) Save(); }
     }
 
     public void RemoveMany(IEnumerable<TaggedFrame> frames)
     {
-        bool any = false;
-        foreach (var f in frames.ToList())
-            if (Frames.Remove(f)) any = true;
-        if (any) Save();
+        lock (_lock)
+        {
+            bool any = false;
+            foreach (var f in frames.ToList())
+                if (Frames.Remove(f)) any = true;
+            if (any) Save();
+        }
     }
 
     public void Rename(TaggedFrame frame, string newName)
     {
         var trimmed = newName?.Trim();
         if (string.IsNullOrEmpty(trimmed)) return;
-        if (frame.TagName == trimmed) return;
-        frame.TagName = trimmed;
-        Save();
+        lock (_lock)
+        {
+            if (frame.TagName == trimmed) return;
+            frame.TagName = trimmed;
+            Save();
+        }
     }
 
     /// <summary>
     /// Returns each distinct tag name whose stored frames sit within
     /// <paramref name="maxDistance"/> Hamming bits of <paramref name="hash"/>.
+    /// Reads work on a snapshot of Frames so concurrent writers don't trip the
+    /// LINQ enumeration.
     /// </summary>
     public IEnumerable<string> Match(ulong hash, int maxDistance = DefaultMaxDistance)
     {
-        if (hash == 0 || Frames.Count == 0) return [];
-        return Frames
+        if (hash == 0) return [];
+        TaggedFrame[] snap;
+        lock (_lock) { if (Frames.Count == 0) return []; snap = Frames.ToArray(); }
+        return snap
             .Where(f => PerceptualHashService.HammingDistance(f.Hash, hash) <= maxDistance)
-            .Select(f => f.TagName)
-            .Distinct(StringComparer.OrdinalIgnoreCase);
-    }
-
-    /// <summary>
-    /// Returns each distinct tag name whose stored embedding has cosine
-    /// similarity ≥ <paramref name="threshold"/> with <paramref name="embedding"/>.
-    /// Used for cross-image person matching independent of dHash.
-    /// </summary>
-    public IEnumerable<string> MatchByEmbedding(float[] embedding,
-                                                float threshold = DefaultCosineThreshold)
-    {
-        if (embedding is null || embedding.Length == 0 || Frames.Count == 0) return [];
-        return Frames
-            .Where(f => f.Embedding is { Length: > 0 } &&
-                        CosineSimilarity(f.Embedding, embedding) >= threshold)
             .Select(f => f.TagName)
             .Distinct(StringComparer.OrdinalIgnoreCase);
     }
@@ -104,8 +107,10 @@ public class FrameTagStore
     /// </summary>
     public IEnumerable<(string TagName, int Distance, TaggedFrame Frame)> BestDistancePerTag(ulong hash)
     {
-        if (hash == 0 || Frames.Count == 0) yield break;
-        foreach (var grp in Frames.GroupBy(f => f.TagName, StringComparer.OrdinalIgnoreCase))
+        if (hash == 0) yield break;
+        TaggedFrame[] snap;
+        lock (_lock) { if (Frames.Count == 0) yield break; snap = Frames.ToArray(); }
+        foreach (var grp in snap.GroupBy(f => f.TagName, StringComparer.OrdinalIgnoreCase))
         {
             TaggedFrame? best = null;
             int bestDist = int.MaxValue;
@@ -121,9 +126,11 @@ public class FrameTagStore
     /// <summary>Returns the closest cosine similarity per tag name (for tags whose frames carry an embedding).</summary>
     public IEnumerable<(string TagName, float Similarity, TaggedFrame Frame)> BestSimilarityPerTag(float[] embedding)
     {
-        if (embedding is null || embedding.Length == 0 || Frames.Count == 0) yield break;
-        foreach (var grp in Frames.Where(f => f.Embedding is { Length: > 0 })
-                                  .GroupBy(f => f.TagName, StringComparer.OrdinalIgnoreCase))
+        if (embedding is null || embedding.Length == 0) yield break;
+        TaggedFrame[] snap;
+        lock (_lock) { if (Frames.Count == 0) yield break; snap = Frames.ToArray(); }
+        foreach (var grp in snap.Where(f => f.Embedding is { Length: > 0 })
+                                 .GroupBy(f => f.TagName, StringComparer.OrdinalIgnoreCase))
         {
             TaggedFrame? best = null;
             float bestSim = -1;
@@ -153,26 +160,33 @@ public class FrameTagStore
     {
         try
         {
-            if (File.Exists(_path))
-            {
-                Frames = JsonSerializer.Deserialize<List<TaggedFrame>>(File.ReadAllText(_path))
-                         ?? [];
-            }
+            if (!File.Exists(_path)) return;
+            var loaded = JsonSerializer.Deserialize<List<TaggedFrame>>(File.ReadAllText(_path)) ?? [];
+            lock (_lock) Frames = loaded;
         }
-        catch { Frames = []; }
+        catch
+        {
+            lock (_lock) Frames = [];
+        }
     }
 
     /// <summary>Persist any external mutations to existing TaggedFrame objects
     /// (e.g. ThumbnailPng backfilled from the source file).</summary>
-    public void Flush() => Save();
+    public void Flush() { lock (_lock) Save(); }
 
+    // Must be called with _lock held. Atomic write: serialize → tmp file →
+    // File.Move with overwrite, so a crash mid-write can't corrupt the real
+    // file. Thumbnails are base64-encoded inside this JSON, so WriteIndented
+    // is off — the file is machine-only, no readability cost.
     private void Save()
     {
         try
         {
-            File.WriteAllText(_path,
-                JsonSerializer.Serialize(Frames,
-                    new JsonSerializerOptions { WriteIndented = true }));
+            var json = JsonSerializer.Serialize(Frames,
+                new JsonSerializerOptions { WriteIndented = false });
+            var tmp = _path + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, _path, overwrite: true);
         }
         catch { }
     }

@@ -1216,6 +1216,13 @@ public class MainViewModel : INotifyPropertyChanged
                 ScanFilesDone++;
             }
         }
+        catch (OperationCanceledException)
+        {
+            // User clicked Cancel — exit gracefully without a crash dialog.
+            // This is async void so an unhandled exception would surface as
+            // a UI-thread crash.
+            StatusText = "Scan-for-tags cancelled.";
+        }
         finally
         {
             IsScanningForTags = false;
@@ -1296,7 +1303,20 @@ public class MainViewModel : INotifyPropertyChanged
                     }
                 });
         }
-        catch { /* per-file scan failures are non-fatal */ }
+        catch (OperationCanceledException)
+        {
+            // Cancellation is the user's intent — propagate so the outer
+            // scan loop stops, rather than silently treating cancel as
+            // "scan complete, no hits".
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // One bad file shouldn't kill the whole scan, but the user should
+            // see what went wrong rather than be told everything is fine.
+            Application.Current.Dispatcher.Invoke(() =>
+                StatusText = $"Tag-scan error on {record.FileName}: {ex.Message}");
+        }
 
         return bestPerTag.Values.ToList();
     }
@@ -2107,6 +2127,53 @@ public class MainViewModel : INotifyPropertyChanged
 
     // ── Filtering ─────────────────────────────────────────────────────────────
 
+    // Cached filter sets, rebuilt only when the user changes a checkbox or
+    // RefreshFilter() is called. Before: ApplyFilter rebuilt these HashSets
+    // per file × 740k files × every refresh = the slow filter many of our
+    // status messages have blamed for "scan got slower again".
+    // null  → cache empty, will be populated on the next call.
+    // count == 0 → no filter is active (everything passes).
+    private HashSet<string>? _filterAllowedExtensions;
+    private HashSet<ImageSubcategory>? _filterAllowedImageGroups;
+
+    private void InvalidateFilterCache()
+    {
+        _filterAllowedExtensions  = null;
+        _filterAllowedImageGroups = null;
+    }
+
+    private void EnsureFilterCache()
+    {
+        if (_filterAllowedExtensions is null)
+        {
+            int checkedExts = 0, totalExts = 0;
+            foreach (var g in FileTypeGroups)
+                foreach (var e in g.Extensions)
+                {
+                    totalExts++;
+                    if (e.IsChecked) checkedExts++;
+                }
+            // Empty set means "no filter active" — see Zero-checked = no filter
+            // convention used by StartScan. Sentinel-empty avoids a separate
+            // _isExtensionFilterActive flag.
+            if (checkedExts == 0 || checkedExts == totalExts)
+                _filterAllowedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            else
+                _filterAllowedExtensions = FileTypeGroups
+                    .SelectMany(g => g.Extensions.Where(e => e.IsChecked).Select(e => e.Extension))
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+
+        if (_filterAllowedImageGroups is null)
+        {
+            if (ImageGroupFilters.Count == 0 || ImageGroupFilters.All(f => f.IsChecked))
+                _filterAllowedImageGroups = [];
+            else
+                _filterAllowedImageGroups = ImageGroupFilters
+                    .Where(f => f.IsChecked).Select(f => f.Group).ToHashSet();
+        }
+    }
+
     private bool ApplyFilter(object obj)
     {
         if (obj is not FileRecord r) return false;
@@ -2119,25 +2186,16 @@ public class MainViewModel : INotifyPropertyChanged
                 return false;
         }
 
-        // Extension filter applies only when the user has a partial selection
-        // (some but not all extensions checked). Zero-checked is treated as
-        // "no filter intent" — same convention as StartScan — so the grid
-        // doesn't go blank when the user clicks "Deselect all".
-        int checkedExts = FileTypeGroups.Sum(g => g.Extensions.Count(e => e.IsChecked));
-        int totalExts   = FileTypeGroups.Sum(g => g.Extensions.Count);
-        if (checkedExts > 0 && checkedExts < totalExts)
-        {
-            var allowed = FileTypeGroups
-                .SelectMany(g => g.Extensions.Where(e => e.IsChecked).Select(e => e.Extension))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            if (!allowed.Contains(r.Extension)) return false;
-        }
+        EnsureFilterCache();
 
-        if (r.Category == FileCategory.Image && ImageGroupFilters.Count > 0 && ImageGroupFilters.Any(f => !f.IsChecked))
-        {
-            var allowed = ImageGroupFilters.Where(f => f.IsChecked).Select(f => f.Group).ToHashSet();
-            if (!allowed.Contains(r.ImageGroup)) return false;
-        }
+        // Extension filter — empty cache = no filter active (zero-checked or
+        // all-checked, see the cache-build comment above).
+        if (_filterAllowedExtensions!.Count > 0 && !_filterAllowedExtensions.Contains(r.Extension))
+            return false;
+
+        if (r.Category == FileCategory.Image && _filterAllowedImageGroups!.Count > 0
+            && !_filterAllowedImageGroups.Contains(r.ImageGroup))
+            return false;
 
         // Per-column filters from the grid header dropdowns. Each is a no-op
         // (returns true immediately) when no values have been unchecked.
@@ -2157,6 +2215,10 @@ public class MainViewModel : INotifyPropertyChanged
     /// </summary>
     public void RefreshFilter()
     {
+        // Filter state may have changed (sidebar checkbox, column dropdown,
+        // search text). Drop the cache so EnsureFilterCache rebuilds it once
+        // for this whole refresh pass instead of per-file.
+        InvalidateFilterCache();
         foreach (var r in _allFiles)
         {
             if (r.IsSelected && !ApplyFilter(r))
