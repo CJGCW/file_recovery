@@ -2,8 +2,9 @@
 bin/
 obj/
 
-# Bundled ffmpeg binary (~100 MB) — downloaded separately, see CLAUDE.md
+# Bundled external binaries — downloaded separately, see CLAUDE.md
 tools/ffmpeg.exe
+tools/tessdata/
 
 # User-specific files
 *.user

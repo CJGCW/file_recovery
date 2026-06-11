@@ -12,26 +12,34 @@ public class FileScanner
 {
     private static long _idCounter;
 
+    // Folders we always skip regardless of user config — Windows protected
+    // / per-user areas that we can't usefully scan into anyway.
+    private static readonly HashSet<string> SystemSkippedFolders =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "System Volume Information",
+            "$RECYCLE.BIN", "$Recycle.Bin",
+            "Config.Msi",
+            "Recovery",
+        };
+
     private readonly FileTypeDetector _detector = new();
     private readonly int _parallelism;
+    private readonly HashSet<string> _userSkippedFolders;
 
-    public FileScanner(int? parallelism = null)
+    public FileScanner(int? parallelism = null, IEnumerable<string>? extraSkippedFolderNames = null)
     {
         _parallelism = parallelism ?? Math.Max(2, Environment.ProcessorCount);
+        _userSkippedFolders = extraSkippedFolderNames is null
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(extraSkippedFolderNames, StringComparer.OrdinalIgnoreCase);
     }
 
     public async IAsyncEnumerable<FileRecord> ScanAsync(
         string rootPath,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var files = Directory.EnumerateFiles(rootPath, "*",
-            new EnumerationOptions
-            {
-                RecurseSubdirectories  = true,
-                IgnoreInaccessible     = true,
-                ReturnSpecialDirectories = false,
-                AttributesToSkip       = FileAttributes.ReparsePoint // skip symlink loops
-            });
+        var files = EnumerateFilesSkippingFolders(rootPath);
 
         var channel = System.Threading.Channels.Channel.CreateBounded<FileRecord>(
             new System.Threading.Channels.BoundedChannelOptions(2000)
@@ -70,6 +78,72 @@ public class FileScanner
         await writeTask;
     }
 
+    // Manual directory walk so we can prune subtrees by folder name. Each
+    // directory's files stream out first, then subdirectories get pushed onto
+    // the stack unless their name is in the system or user skip set.
+    // SafeEnumerate* wraps the OS enumerator so a single bad subdir (perms,
+    // IO mid-enumeration) ends that directory's iteration without killing
+    // the whole scan, while keeping enumeration lazy — no per-directory list
+    // materialisation, which is what the previous version did and what made
+    // scans noticeably slower on deep trees.
+    private IEnumerable<string> EnumerateFilesSkippingFolders(string root)
+    {
+        var stack = new Stack<string>();
+        stack.Push(root);
+
+        while (stack.Count > 0)
+        {
+            var dir = stack.Pop();
+
+            foreach (var f in SafeEnumerateFiles(dir))
+                yield return f;
+
+            foreach (var sd in SafeEnumerateDirectories(dir))
+            {
+                var name = Path.GetFileName(sd);
+                if (SystemSkippedFolders.Contains(name)) continue;
+                if (_userSkippedFolders.Contains(name))  continue;
+                stack.Push(sd);
+            }
+        }
+    }
+
+    private static IEnumerable<string> SafeEnumerateFiles(string dir)
+    {
+        IEnumerator<string> e;
+        try { e = Directory.EnumerateFiles(dir).GetEnumerator(); }
+        catch { yield break; }
+        using (e)
+        {
+            while (true)
+            {
+                bool moved;
+                try { moved = e.MoveNext(); }
+                catch { yield break; }
+                if (!moved) yield break;
+                yield return e.Current;
+            }
+        }
+    }
+
+    private static IEnumerable<string> SafeEnumerateDirectories(string dir)
+    {
+        IEnumerator<string> e;
+        try { e = Directory.EnumerateDirectories(dir).GetEnumerator(); }
+        catch { yield break; }
+        using (e)
+        {
+            while (true)
+            {
+                bool moved;
+                try { moved = e.MoveNext(); }
+                catch { yield break; }
+                if (!moved) yield break;
+                yield return e.Current;
+            }
+        }
+    }
+
     private FileRecord? ProcessFile(string filePath)
     {
         try
@@ -81,6 +155,10 @@ public class FileScanner
             if (detected is null) return null;
 
             var cat = detected.Value.Category;
+            // Use the inferred extension (handles PhotoRec underscore names)
+            // so the filter UI and per-extension behaviour treat e.g.
+            // "f0002227_memdiag_exe" exactly like "memdiag.exe".
+            var ext = FileTypeDetector.GetEffectiveExtension(filePath);
 
             // Compute once — used for both VideoInfo and Duration
             VideoInfo? videoInfo = cat == FileCategory.Video
@@ -91,7 +169,7 @@ public class FileScanner
                 Id               = Interlocked.Increment(ref _idCounter),
                 FullPath         = filePath,
                 FileName         = info.Name,
-                Extension        = info.Extension.ToLowerInvariant(),
+                Extension        = ext,
                 DetectedMimeType = detected.Value.MimeType,
                 Category         = cat,
                 FileSizeBytes    = info.Length,

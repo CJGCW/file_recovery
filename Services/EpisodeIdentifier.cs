@@ -20,7 +20,7 @@ public static class EpisodeIdentifier
         new(@"[\\/:*?""<>|]", RegexOptions.Compiled);
 
     public static async Task<IList<SuggestionResult>> IdentifyAsync(
-        BitmapSource frame, AppSettings settings, CancellationToken ct = default)
+        BitmapSource frame, IList<string> ocrLines, AppSettings settings, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(settings.GoogleVisionKey))
             throw new InvalidOperationException("Google Cloud Vision API key not configured.");
@@ -37,7 +37,7 @@ public static class EpisodeIdentifier
             throw new InvalidOperationException($"Vision API: {ex.Message}", ex);
         }
 
-        var parsed = ParseRef(vision);
+        var parsed = ParseRef(vision, ocrLines);
         if (parsed is null) return [];
 
         var suggestions = new List<SuggestionResult>();
@@ -70,9 +70,16 @@ public static class EpisodeIdentifier
         if (suggestions.Count == 0 && parsed.ShowName is not null && parsed.Season is null
             && !string.IsNullOrWhiteSpace(settings.TmdbKey))
         {
+            // Build a query that combines the franchise/show name with the most
+            // distinctive on-screen text (e.g. "Star Wars" + "EPISODE VII" →
+            // TMDB returns The Force Awakens instead of the 1977 original).
+            var query = BuildMovieQuery(parsed.ShowName, ocrLines);
             try
             {
-                var movie = await TmdbService.FindMovieAsync(parsed.ShowName, settings.TmdbKey, ct);
+                var movie = await TmdbService.FindMovieAsync(query, settings.TmdbKey, ct);
+                if (movie is null && !string.Equals(query, parsed.ShowName, StringComparison.OrdinalIgnoreCase))
+                    movie = await TmdbService.FindMovieAsync(parsed.ShowName, settings.TmdbKey, ct);
+
                 if (movie is not null)
                 {
                     var year = movie.AirDate?[..4];
@@ -108,11 +115,11 @@ public static class EpisodeIdentifier
         return suggestions;
     }
 
-    private static ParsedRef? ParseRef(VisionResult v)
+    private static ParsedRef? ParseRef(VisionResult v, IList<string> ocrLines)
     {
-        // Gather all text for S##E## extraction
+        // Gather all text for S##E## extraction — Vision metadata plus on-screen text.
         var corpus = string.Join(" ",
-            v.PageTitles.Concat(v.PageUrls).Prepend(v.BestGuessLabel ?? ""));
+            v.PageTitles.Concat(v.PageUrls).Concat(ocrLines).Prepend(v.BestGuessLabel ?? ""));
 
         int? season = null, episode = null;
         var m = SeCode.Match(corpus);
@@ -161,6 +168,23 @@ public static class EpisodeIdentifier
 
     private static string Clean(string s) =>
         Illegal.Replace(s, "").Trim().TrimEnd('.');
+
+    // Picks the most useful OCR line to append to the franchise/show name for
+    // a TMDB movie lookup — the largest-text line on the frame that adds new
+    // information (isn't a sub/superset of the show name and isn't too long
+    // to look like a paragraph of crawl narration).
+    private static string BuildMovieQuery(string showName, IList<string> ocrLines)
+    {
+        var disambiguator = ocrLines
+            .Where(l => l.Length is >= 2 and <= 40)
+            .Where(l => !l.Contains(showName, StringComparison.OrdinalIgnoreCase)
+                     && !showName.Contains(l, StringComparison.OrdinalIgnoreCase))
+            .FirstOrDefault();
+
+        return string.IsNullOrWhiteSpace(disambiguator)
+            ? showName
+            : $"{showName} {disambiguator}";
+    }
 }
 
 internal record ParsedRef(string? ShowName, string? EpisodeTitle, int? Season, int? Episode);

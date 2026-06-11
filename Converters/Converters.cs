@@ -136,3 +136,20 @@ public class DurationConverter : IValueConverter
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         => throw new NotImplementedException();
 }
+
+/// <summary>
+/// Picks one of two brushes by a bool. Used to tint the column-filter
+/// chevron purple when its filter is active and grey otherwise.
+/// </summary>
+public class BoolToBrushConverter : IValueConverter
+{
+    public Brush TrueBrush  { get; set; } = Brushes.White;
+    public Brush FalseBrush { get; set; } = Brushes.Gray;
+
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        => value is true ? TrueBrush : FalseBrush;
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}
+
