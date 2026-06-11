@@ -1269,13 +1269,20 @@ public class MainViewModel : INotifyPropertyChanged
             await VideoThumbnailService.ScanDeepAsync(record.FullPath, 420, ct,
                 (pos, bmp) =>
                 {
+                    // Encode-at-most-once-per-frame. Multiple tags can hit the
+                    // same frame (whole-frame dHash + several crops + embedding);
+                    // without this each would re-encode the same bitmap. Lazy
+                    // defers the PNG encode until the first hit needs it AND
+                    // skips it entirely when no tag is improved by this frame.
+                    var framePng = new Lazy<byte[]?>(() => EncodeThumbnailPng(bmp, maxWidth: 320));
+
                     var whole = PerceptualHashService.Compute(bmp);
                     if (whole != 0)
                     {
                         foreach (var (tag, dist, _) in _frameTagStore.BestDistancePerTag(whole))
                         {
                             if (dist <= FrameTagStore.DefaultMaxDistance)
-                                ConsiderHit(tag, dist, $"dHash dist {dist}", bmp, bestPerTag, record);
+                                ConsiderHit(tag, dist, $"dHash dist {dist}", framePng, bestPerTag, record);
                         }
                     }
 
@@ -1287,7 +1294,7 @@ public class MainViewModel : INotifyPropertyChanged
                             foreach (var (tag, dist, _) in _frameTagStore.BestDistancePerTag(ch))
                             {
                                 if (dist <= FrameTagStore.DefaultCropMaxDistance)
-                                    ConsiderHit(tag, dist, $"crop dHash dist {dist}", bmp, bestPerTag, record);
+                                    ConsiderHit(tag, dist, $"crop dHash dist {dist}", framePng, bestPerTag, record);
                             }
                         }
                         if (anyEmbeddings)
@@ -1297,7 +1304,7 @@ public class MainViewModel : INotifyPropertyChanged
                                 foreach (var (tag, sim, _) in _frameTagStore.BestSimilarityPerTag(emb))
                                 {
                                     if (sim >= FrameTagStore.DefaultCosineThreshold)
-                                        ConsiderHit(tag, 1000.0 - sim, $"cosine {sim:F3}", bmp, bestPerTag, record);
+                                        ConsiderHit(tag, 1000.0 - sim, $"cosine {sim:F3}", framePng, bestPerTag, record);
                                 }
                         }
                     }
@@ -1322,19 +1329,16 @@ public class MainViewModel : INotifyPropertyChanged
     }
 
     private static void ConsiderHit(
-        string tag, double strength, string label, BitmapSource bmp,
+        string tag, double strength, string label, Lazy<byte[]?> framePng,
         Dictionary<string, ScanResult> bestPerTag, FileRecord record)
     {
         if (bestPerTag.TryGetValue(tag, out var existing) && existing.MatchStrength <= strength)
             return;
 
-        // Encode the matching frame as PNG bytes immediately. We do this here
-        // — while the bmp's pixel buffer is still alive on the scan thread —
-        // rather than holding a BitmapSource reference, because the ffmpeg
-        // pipe that fed bmp gets torn down at end of scan and any reference
-        // we kept goes blank when the results window reopens.
-        var thumbPng = EncodeThumbnailPng(bmp, maxWidth: 320);
-
+        // .Value triggers EncodeThumbnailPng on the first hit in this frame,
+        // returns the cached bytes for any subsequent hits. Encoded while
+        // the bmp's pixel buffer is still alive on the scan thread (the
+        // ffmpeg pipe tears it down at end of scan, so we can't defer).
         bestPerTag[tag] = new ScanResult
         {
             FilePath           = record.FullPath,
@@ -1342,7 +1346,7 @@ public class MainViewModel : INotifyPropertyChanged
             TagName            = tag,
             MatchStrength      = strength,
             MatchStrengthLabel = label,
-            ThumbnailPng       = thumbPng,
+            ThumbnailPng       = framePng.Value,
         };
     }
 
@@ -2483,8 +2487,15 @@ public class MainViewModel : INotifyPropertyChanged
             if (IsTextLikeExtension(record.Extension))
             {
                 // Read inline — bypass the Shell preview handler entirely.
-                TextPreviewContent = ReadTextPreview(record.FullPath);
+                // Off-thread so a 256 KB read from a slow recovery drive
+                // doesn't stall the UI. Re-check selection on the way back —
+                // user might have clicked away while we were reading.
                 ShowTextPreview    = true;
+                TextPreviewContent = "Loading…";
+                var path = record.FullPath;
+                var content = await Task.Run(() => ReadTextPreview(path));
+                if (SelectedFile is not null && SelectedFile.FullPath == path)
+                    TextPreviewContent = content;
             }
             else
             {
@@ -2512,6 +2523,11 @@ public class MainViewModel : INotifyPropertyChanged
     // past the limit gets truncated with a marker line so the user knows.
     private const int TextPreviewByteLimit = 256 * 1024;
 
+    // BOM-aware text read. StreamReader with detectEncodingFromByteOrderMarks
+    // sniffs UTF-8 / UTF-16-LE / UTF-16-BE / UTF-32 BOMs and decodes the file
+    // accordingly. Files with no BOM fall back to the constructor's UTF-8 —
+    // good enough for previewing recovery output, where most text files are
+    // UTF-8 or have a BOM if they aren't.
     private static string ReadTextPreview(string path)
     {
         try
@@ -2521,9 +2537,12 @@ public class MainViewModel : INotifyPropertyChanged
             int  toRead = (int)Math.Min(total, TextPreviewByteLimit);
             var buf = new byte[toRead];
             int read = fs.Read(buf, 0, toRead);
-            // System.Text.Encoding.UTF8 with a permissive decoder fallback would
-            // mangle non-UTF8 files; UTF8 with replacement is fine for preview.
-            string content = System.Text.Encoding.UTF8.GetString(buf, 0, read);
+
+            using var ms = new MemoryStream(buf, 0, read);
+            using var sr = new StreamReader(ms, System.Text.Encoding.UTF8,
+                                            detectEncodingFromByteOrderMarks: true);
+            string content = sr.ReadToEnd();
+
             if (total > toRead)
                 content += $"\n\n── truncated — showing first {toRead / 1024} KB of {total / 1024} KB ──";
             return content;

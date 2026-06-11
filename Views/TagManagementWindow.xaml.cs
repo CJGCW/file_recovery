@@ -15,6 +15,10 @@ public partial class TagManagementWindow : Window
     private readonly FrameTagStore _store;
     private readonly System.Collections.ObjectModel.ObservableCollection<TagRow> _rows = [];
     private string _filter = string.Empty;
+    // Cancelled in OnClosing so backfill stops cleanly when the user closes
+    // mid-pass — and the work done so far is flushed via OnClosing's Rename
+    // path + a final Flush().
+    private readonly System.Threading.CancellationTokenSource _backfillCts = new();
 
     public TagManagementWindow(FrameTagStore store)
     {
@@ -45,24 +49,55 @@ public partial class TagManagementWindow : Window
             .ToList();
         if (pending.Count == 0) return;
 
+        // Parallel pass — was sequential, which was the dominant time cost
+        // on a tag store with dozens of missing thumbnails. Cap concurrency
+        // so we don't saturate the disk on a slow recovery drive. Flush
+        // periodically so a mid-pass close doesn't lose all the work.
         int backfilled = 0;
-        foreach (var row in pending)
+        int unflushed  = 0;
+        const int flushEvery = 8;
+        var ct = _backfillCts.Token;
+        var opts = new ParallelOptions
         {
-            var sourcePath = row.SourceFile;
-            // Off-thread: file I/O + Media Foundation decode.
-            var png = await Task.Run(() => ExtractThumbnailPng(sourcePath));
-            if (png is null) continue;
+            MaxDegreeOfParallelism = Math.Min(4, Environment.ProcessorCount),
+            CancellationToken      = ct,
+        };
 
-            row.Frame.ThumbnailPng = png;
-            row.NotifyThumbnailChanged();
-            backfilled++;
-        }
-
-        if (backfilled > 0)
+        try
         {
-            _store.Flush();
-            StatusLine.Text = $"{_rows.Count} tag(s) stored • {_rows.Count(r => r.SourceMissing)} have missing source files • backfilled {backfilled} thumbnail(s)";
+            await Parallel.ForEachAsync(pending, opts, async (row, innerCt) =>
+            {
+                var sourcePath = row.SourceFile;
+                var png = await Task.Run(() => ExtractThumbnailPng(sourcePath), innerCt);
+                if (png is null) return;
+
+                // Mutation + UI signal on the UI thread.
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    row.Frame.ThumbnailPng = png;
+                    row.NotifyThumbnailChanged();
+                });
+
+                int done = System.Threading.Interlocked.Increment(ref backfilled);
+                int sinceFlush = System.Threading.Interlocked.Increment(ref unflushed);
+                if (sinceFlush >= flushEvery)
+                {
+                    System.Threading.Interlocked.Exchange(ref unflushed, 0);
+                    _store.Flush();
+                    await Dispatcher.InvokeAsync(() => RefreshBackfillStatus(done));
+                }
+            });
         }
+        catch (OperationCanceledException) { /* window closed mid-pass */ }
+
+        if (unflushed > 0) _store.Flush();
+        if (backfilled > 0) RefreshBackfillStatus(backfilled);
+    }
+
+    private void RefreshBackfillStatus(int backfilled)
+    {
+        int orphan = _rows.Count(r => r.SourceMissing);
+        StatusLine.Text = $"{_rows.Count} tag(s) stored • {orphan} have missing source files • backfilled {backfilled} thumbnail(s)";
     }
 
     // Re-extracts a thumbnail from the recorded source file. For images we
@@ -184,9 +219,17 @@ public partial class TagManagementWindow : Window
 
     protected override void OnClosing(CancelEventArgs e)
     {
-        // Commit any pending edits (e.g. user typed a new name and clicked Close).
+        // Stop the backfill pass cleanly so in-flight items don't keep
+        // writing into Frame.ThumbnailPng after the window goes away.
+        _backfillCts.Cancel();
+
+        // Commit any pending edits (e.g. user typed a new name and clicked
+        // Close). Rename's Save() also persists any thumbnails the backfill
+        // already wrote; the explicit Flush() after handles the case where
+        // no rename happened but a backfill batch was sitting unflushed.
         foreach (var r in _rows)
             _store.Rename(r.Frame, r.TagName);
+        _store.Flush();
         base.OnClosing(e);
     }
 }
