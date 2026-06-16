@@ -20,23 +20,45 @@
     <cv:DurationConverter              x:Key="DurationConverter"/>
     <cv:StringToBrushConverter         x:Key="StringToBrush"/>
 
-    <!-- DataGrid row style with hover/select -->
+    <!-- DataGrid row style with hover/select. A custom template gives us
+         an accent-coloured left bar that's painted only when the row is the
+         focused selection — much more visible than just a background tint
+         against the already-dark BgDark surface. -->
     <Style TargetType="DataGridRow">
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
-      <Setter Property="BorderThickness" Value="0,0,0,0"/>
+      <!-- Reserve a 3-pixel slot on the left of every row so the IsSelected
+           trigger can paint an accent stripe there without re-laying-out. -->
+      <Setter Property="BorderThickness" Value="3,0,0,0"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
       <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="DataGridRow">
+            <Border Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    SnapsToDevicePixels="True">
+              <DataGridCellsPresenter ItemsPanel="{TemplateBinding ItemsPanel}"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
       <Style.Triggers>
-        <!-- Checkbox-selected (bulk selection) — subtle tint -->
+        <!-- Checkbox-selected (bulk selection) — subtle tint, no left bar. -->
         <DataTrigger Binding="{Binding IsSelected}" Value="True">
-          <Setter Property="Background" Value="#282848"/>
+          <Setter Property="Background" Value="#2F2F55"/>
         </DataTrigger>
         <Trigger Property="IsMouseOver" Value="True">
           <Setter Property="Background" Value="{StaticResource RowHover}"/>
         </Trigger>
-        <!-- Preview-selected row -->
+        <!-- Focus-selected row: brighter purple background + accent left bar.
+             This is the trigger that actually highlights the "selected" row
+             the user just clicked. Wins over the DataTrigger above because
+             it comes later in document order. -->
         <Trigger Property="IsSelected" Value="True">
-          <Setter Property="Background" Value="{StaticResource SelectedRow}"/>
+          <Setter Property="Background" Value="#3F3680"/>
+          <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
         </Trigger>
       </Style.Triggers>
     </Style>
