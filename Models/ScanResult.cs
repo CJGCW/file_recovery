@@ -27,6 +27,14 @@ public class ScanResult : INotifyPropertyChanged
     /// <summary>Numeric score — lower for dHash (Hamming distance), higher for embedding cosine sim.</summary>
     public double MatchStrength { get; init; }
 
+    /// <summary>
+    /// True when this hit was produced entirely from the persistent hash
+    /// cache, without re-decoding the source video. Surfaced in the Scan
+    /// Results window as a small "cached" badge so the user knows why the
+    /// thumbnail is missing.
+    /// </summary>
+    public bool FromCache { get; init; }
+
     /// <summary>Human-readable score (e.g. "dHash distance 4" or "cosine 0.81").</summary>
     public string MatchStrengthLabel { get; init; } = string.Empty;
 

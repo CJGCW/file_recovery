@@ -120,13 +120,40 @@
         <DataGridTemplateColumn Header="Thumbnail" Width="120" SortMemberPath="MatchStrength">
           <DataGridTemplateColumn.CellTemplate>
             <DataTemplate>
-              <Image Source="{Binding Thumbnail}" Stretch="Uniform"
-                     Margin="4" RenderOptions.BitmapScalingMode="HighQuality">
-                <Image.ToolTip>
-                  <Image Source="{Binding Thumbnail}" Width="420"
-                         Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"/>
-                </Image.ToolTip>
-              </Image>
+              <Grid>
+                <!-- Normal thumbnail. Visible when we have PNG bytes. -->
+                <Image Source="{Binding Thumbnail}" Stretch="Uniform"
+                       Margin="4" RenderOptions.BitmapScalingMode="HighQuality">
+                  <Image.ToolTip>
+                    <Image Source="{Binding Thumbnail}" Width="420"
+                           Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality"/>
+                  </Image.ToolTip>
+                </Image>
+                <!-- "Cached" badge for hits produced from ScannedVideoStore
+                     without a live decode. No thumbnail bytes available
+                     because we never re-launched ffmpeg for this video. -->
+                <Border Background="#252540" BorderBrush="#3A3A5C" BorderThickness="1"
+                        CornerRadius="4" Padding="6,4" Margin="4"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                        ToolTip="This match came from the persistent hash cache. Re-run scan with the file selected to capture a thumbnail.">
+                  <Border.Style>
+                    <Style TargetType="Border">
+                      <Setter Property="Visibility" Value="Collapsed"/>
+                      <Style.Triggers>
+                        <DataTrigger Binding="{Binding FromCache}" Value="True">
+                          <Setter Property="Visibility" Value="Visible"/>
+                        </DataTrigger>
+                      </Style.Triggers>
+                    </Style>
+                  </Border.Style>
+                  <StackPanel Orientation="Vertical">
+                    <TextBlock Text="cached" FontSize="10" Foreground="#9090B0"
+                               HorizontalAlignment="Center"/>
+                    <TextBlock Text="no thumbnail" FontSize="9" Foreground="#5A5A7C"
+                               HorizontalAlignment="Center"/>
+                  </StackPanel>
+                </Border>
+              </Grid>
             </DataTemplate>
           </DataGridTemplateColumn.CellTemplate>
         </DataGridTemplateColumn>

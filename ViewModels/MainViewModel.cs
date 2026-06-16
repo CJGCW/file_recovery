@@ -82,6 +82,7 @@ public class MainViewModel : INotifyPropertyChanged
     // ── Tagging ──────────────────────────────────────────────────────────────
     private readonly TagStore _tagStore = new();
     private readonly FrameTagStore _frameTagStore = new();
+    private readonly ScannedVideoStore _scannedVideoStore = new();
     private string _newTagText = string.Empty;
     private IList<string> _suggestedTags = [];
 
@@ -1261,8 +1262,21 @@ public class MainViewModel : INotifyPropertyChanged
     {
         if (_frameTagStore.Frames.Count == 0) return [];
 
+        // Fast path: video has already been deep-scanned this session or in
+        // a previous one. Cached whole-frame hashes are good enough to do
+        // dHash matching without re-launching ffmpeg. Crop + embedding
+        // matching requires a fresh scan (we don't cache those), but for
+        // most matches (logos, title cards, distinctive frames) the whole-
+        // frame hash hits first anyway.
+        var cached = _scannedVideoStore.TryGet(record.FullPath);
+        if (cached is not null)
+        {
+            return ScanFromCache(cached, record);
+        }
+
         bool anyEmbeddings = _frameTagStore.Frames.Any(f => f.Embedding is { Length: > 0 });
         var bestPerTag = new Dictionary<string, ScanResult>(StringComparer.OrdinalIgnoreCase);
+        var freshFrames = new List<(TimeSpan Position, ulong Hash)>();
 
         try
         {
@@ -1279,6 +1293,10 @@ public class MainViewModel : INotifyPropertyChanged
                     var whole = PerceptualHashService.Compute(bmp);
                     if (whole != 0)
                     {
+                        // Record for the persistent cache so future tag-scans
+                        // of this video can skip ffmpeg entirely.
+                        freshFrames.Add((pos, whole));
+
                         foreach (var (tag, dist, _) in _frameTagStore.BestDistancePerTag(whole))
                         {
                             if (dist <= FrameTagStore.DefaultMaxDistance)
@@ -1325,6 +1343,43 @@ public class MainViewModel : INotifyPropertyChanged
                 StatusText = $"Tag-scan error on {record.FileName}: {ex.Message}");
         }
 
+        // Persist the freshly computed hashes so the next scan of this video
+        // can hit the cache. Only save when we have a complete (or near-
+        // complete) set; an empty list means the scan failed before yielding
+        // any frame and we don't want to mask a future retry with junk data.
+        if (freshFrames.Count > 0)
+            _scannedVideoStore.Save(record.FullPath, freshFrames);
+
+        return bestPerTag.Values.ToList();
+    }
+
+    // Matches a video's cached whole-frame hashes against every known tag
+    // without touching ffmpeg. No thumbnail can be produced for these hits —
+    // ScanResult.FromCache = true signals the UI to render a "cached" badge
+    // in place of the thumbnail.
+    private IList<ScanResult> ScanFromCache(ScannedVideo cached, FileRecord record)
+    {
+        var bestPerTag = new Dictionary<string, ScanResult>(StringComparer.OrdinalIgnoreCase);
+        foreach (var frame in cached.Frames)
+        {
+            if (frame.Hash == 0) continue;
+            foreach (var (tag, dist, _) in _frameTagStore.BestDistancePerTag(frame.Hash))
+            {
+                if (dist > FrameTagStore.DefaultMaxDistance) continue;
+                if (bestPerTag.TryGetValue(tag, out var existing) && existing.MatchStrength <= dist)
+                    continue;
+                bestPerTag[tag] = new ScanResult
+                {
+                    FilePath           = record.FullPath,
+                    FileName           = record.FileName,
+                    TagName            = tag,
+                    MatchStrength      = dist,
+                    MatchStrengthLabel = $"dHash dist {dist} (cached)",
+                    ThumbnailPng       = null,
+                    FromCache          = true,
+                };
+            }
+        }
         return bestPerTag.Values.ToList();
     }
 
@@ -2567,21 +2622,35 @@ public class MainViewModel : INotifyPropertyChanged
         StatusText       = "Deep scanning...";
         var progress = new Progress<double>(p => DeepScanProgress = p);
         int added = 0;
+        // Accumulated on the scan thread (not UI thread) so we can persist
+        // a single batch at the end. ConcurrentBag would be overkill — the
+        // VideoThumbnailService callback is invoked serially from one
+        // worker thread.
+        var freshFrames = new List<(TimeSpan Position, ulong Hash)>();
         try
         {
             await VideoThumbnailService.ScanDeepAsync(
                 record.FullPath, 420, ct,
-                (pos, bmp) => Application.Current.Dispatcher.Invoke(() =>
+                (pos, bmp) =>
                 {
-                    if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
+                    // Side-channel: compute the hash off the UI thread and
+                    // tuck it away for the persistent cache before we hop
+                    // the dispatcher for the strip update.
+                    var hash = PerceptualHashService.Compute(bmp);
+                    if (hash != 0) freshFrames.Add((pos, hash));
 
-                    // Insert chronologically; skip if a frame at this exact position already exists.
-                    int idx = 0;
-                    while (idx < ThumbnailStrip.Count && ThumbnailStrip[idx].Position < pos) idx++;
-                    if (idx < ThumbnailStrip.Count && ThumbnailStrip[idx].Position == pos) return;
-                    ThumbnailStrip.Insert(idx, new VideoFrame(bmp, pos));
-                    added++;
-                }),
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
+
+                        // Insert chronologically; skip if a frame at this exact position already exists.
+                        int idx = 0;
+                        while (idx < ThumbnailStrip.Count && ThumbnailStrip[idx].Position < pos) idx++;
+                        if (idx < ThumbnailStrip.Count && ThumbnailStrip[idx].Position == pos) return;
+                        ThumbnailStrip.Insert(idx, new VideoFrame(bmp, pos));
+                        added++;
+                    });
+                },
                 progress);
             if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
 
@@ -2593,6 +2662,11 @@ public class MainViewModel : INotifyPropertyChanged
             // post-deep-scan strip without rescanning.
             if (ThumbnailStrip.Count > 0)
                 _scanCache[record.FullPath] = ThumbnailStrip.ToList();
+
+            // Persist the whole-frame hashes so a later scan-for-tags of this
+            // video can skip ffmpeg entirely.
+            if (freshFrames.Count > 0)
+                _scannedVideoStore.Save(record.FullPath, freshFrames);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { StatusText = $"Deep scan failed: {ex.Message}"; }
