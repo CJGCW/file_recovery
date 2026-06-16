@@ -2172,14 +2172,52 @@ public class MainViewModel : INotifyPropertyChanged
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    // Matches "<base> (N)" so we can strip an explicit numeric suffix the
+    // user may have typed and treat all "name", "name (1)", "name (2)" as
+    // one family.
+    private static readonly System.Text.RegularExpressions.Regex NumberedSuffixPattern =
+        new(@"^(.+?)\s+\((\d+)\)$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Pick a free path by continuing the "(N)" numbering from the highest N
+    /// already present in the directory — not by filling the lowest gap.
+    /// Example: with "X.mkv", "X (1).mkv", "X (5).mkv" present, renaming a
+    /// new file to "X.mkv" produces "X (6).mkv" (not "X (2).mkv"). Avoids
+    /// recycling indices the user has previously used.
+    /// </summary>
     private static string MakeUniquePath(string path)
     {
         var dir  = Path.GetDirectoryName(path)!;
         var name = Path.GetFileNameWithoutExtension(path);
         var ext  = Path.GetExtension(path);
-        int n    = 1;
+
+        // Strip a trailing "(N)" so the user typing "X (1).mkv" still
+        // continues the X family — they don't end up with "X (1) (2).mkv".
+        var stripped = NumberedSuffixPattern.Match(name);
+        if (stripped.Success) name = stripped.Groups[1].Value;
+
+        int highest = 0;
+        var pattern = new System.Text.RegularExpressions.Regex(
+            @"^" + System.Text.RegularExpressions.Regex.Escape(name) + @"\s+\((\d+)\)" +
+            System.Text.RegularExpressions.Regex.Escape(ext) + @"$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        try
+        {
+            foreach (var existing in Directory.EnumerateFiles(dir))
+            {
+                var match = pattern.Match(Path.GetFileName(existing));
+                if (match.Success && int.TryParse(match.Groups[1].Value, out int n) && n > highest)
+                    highest = n;
+            }
+        }
+        catch { /* permission / IO error — fall through, next index is highest+1=1 */ }
+
+        // Continue from highest + 1. The While loop is a last-resort guard
+        // against a concurrent write that lands between our scan and the
+        // File.Move caller — never expected to iterate in practice.
+        int next = highest + 1;
         string candidate;
-        do { candidate = Path.Combine(dir, $"{name} ({n++}){ext}"); }
+        do { candidate = Path.Combine(dir, $"{name} ({next++}){ext}"); }
         while (File.Exists(candidate));
         return candidate;
     }
