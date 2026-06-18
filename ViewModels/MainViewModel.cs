@@ -656,6 +656,48 @@ public class MainViewModel : INotifyPropertyChanged
 
     public bool IsTagSuggestionsOpen => TagSuggestions.Count > 0;
 
+    // Size-range filter, in MB. Empty string = no bound on that side.
+    // Stored as strings so the TextBox binding can stay TwoWay even while
+    // the user is mid-typing ("12" → temporarily invalid as a double, etc).
+    private string _minSizeMb = string.Empty;
+    private string _maxSizeMb = string.Empty;
+    private long?  _minSizeBytes;
+    private long?  _maxSizeBytes;
+
+    public string MinSizeMb
+    {
+        get => _minSizeMb;
+        set
+        {
+            _minSizeMb = value ?? string.Empty;
+            _minSizeBytes = ParseMb(_minSizeMb);
+            OnPropertyChanged();
+            RefreshFilter();
+        }
+    }
+
+    public string MaxSizeMb
+    {
+        get => _maxSizeMb;
+        set
+        {
+            _maxSizeMb = value ?? string.Empty;
+            _maxSizeBytes = ParseMb(_maxSizeMb);
+            OnPropertyChanged();
+            RefreshFilter();
+        }
+    }
+
+    private static long? ParseMb(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return null;
+        if (!double.TryParse(s.Trim(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out double mb))
+            return null;
+        if (mb < 0) return null;
+        return (long)(mb * 1024 * 1024);
+    }
+
     public string NewTagText
     {
         get => _newTagText;
@@ -2388,6 +2430,10 @@ public class MainViewModel : INotifyPropertyChanged
         // all-checked, see the cache-build comment above).
         if (_filterAllowedExtensions!.Count > 0 && !_filterAllowedExtensions.Contains(r.Extension))
             return false;
+
+        // Size range (MB → bytes). Either bound is optional.
+        if (_minSizeBytes is long lo && r.FileSizeBytes < lo) return false;
+        if (_maxSizeBytes is long hi && r.FileSizeBytes > hi) return false;
 
         if (r.Category == FileCategory.Image && _filterAllowedImageGroups!.Count > 0
             && !_filterAllowedImageGroups.Contains(r.ImageGroup))

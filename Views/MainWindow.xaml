@@ -168,6 +168,31 @@
             <TextBox Text="{Binding ExcludedFolderNames, UpdateSourceTrigger=PropertyChanged}"
                      ToolTip="Comma-separated folder names to skip during scan (matched by name, case-insensitive). Default: rec"/>
 
+            <!-- Size range (MB). Either bound is optional; blank = no limit. -->
+            <TextBlock Text="SIZE (MB)" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{StaticResource TextSecondary}" Margin="0,12,0,8"/>
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="6"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+              </Grid.RowDefinitions>
+              <TextBlock Grid.Row="0" Grid.Column="0" Text="min" FontSize="9"
+                         Foreground="{StaticResource TextSecondary}" Margin="0,0,0,2"/>
+              <TextBlock Grid.Row="0" Grid.Column="2" Text="max" FontSize="9"
+                         Foreground="{StaticResource TextSecondary}" Margin="0,0,0,2"/>
+              <TextBox Grid.Row="1" Grid.Column="0"
+                       Text="{Binding MinSizeMb, UpdateSourceTrigger=PropertyChanged}"
+                       ToolTip="Minimum file size in MB (blank = no minimum)"/>
+              <TextBox Grid.Row="1" Grid.Column="2"
+                       Text="{Binding MaxSizeMb, UpdateSourceTrigger=PropertyChanged}"
+                       ToolTip="Maximum file size in MB (blank = no maximum)"/>
+            </Grid>
+
             <!-- Delete mode pill toggle. Turns the Scan button below into a bulk-delete button. -->
             <CheckBox Margin="0,10,0,0"
                       IsChecked="{Binding IsDeleteMode}"
