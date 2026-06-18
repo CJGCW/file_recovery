@@ -725,19 +725,24 @@
               </DataGridTemplateColumn.CellTemplate>
             </DataGridTemplateColumn>
 
-            <!-- Checkbox -->
+            <!-- Checkbox. Explicit Width/Height/Margin override the global
+                 CheckBox style's "Margin=0,2" which squashed the box inside
+                 the tight 36-pixel column header. -->
             <DataGridTemplateColumn Width="36" CanUserResize="False">
               <DataGridTemplateColumn.HeaderTemplate>
                 <DataTemplate>
-                  <CheckBox IsThreeState="True" HorizontalAlignment="Center"
+                  <CheckBox IsThreeState="True"
+                            HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Width="18" Height="18" Margin="0"
                             IsChecked="{Binding DataContext.AllSelected, Mode=TwoWay,
                                         RelativeSource={RelativeSource AncestorType=DataGrid}}"/>
                 </DataTemplate>
               </DataGridTemplateColumn.HeaderTemplate>
               <DataGridTemplateColumn.CellTemplate>
                 <DataTemplate>
-                  <CheckBox IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"
-                            HorizontalAlignment="Center"/>
+                  <CheckBox HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Width="18" Height="18" Margin="0"
+                            IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"/>
                 </DataTemplate>
               </DataGridTemplateColumn.CellTemplate>
             </DataGridTemplateColumn>
