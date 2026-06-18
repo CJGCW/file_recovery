@@ -3043,7 +3043,16 @@ public class MainViewModel : INotifyPropertyChanged
             if (!byCategory.TryGetValue(cat, out var exts)) continue;
 
             var group = new CategoryExtensionGroup(cat, CategoryLabel(cat),
-                onGroupChanged: () => RefreshFilter());
+                onGroupChanged: () =>
+                {
+                    // Notify HasUncheckedFileType so the sidebar
+                    // "Select all" / "Deselect all" toggle's label flips
+                    // immediately when an individual extension is checked
+                    // or unchecked — otherwise the label stays stale and
+                    // the next click looks like it's doing the wrong thing.
+                    OnPropertyChanged(nameof(HasUncheckedFileType));
+                    RefreshFilter();
+                });
 
             foreach (var ext in exts)
                 group.AddExtension(ext);
