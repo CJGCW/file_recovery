@@ -80,6 +80,33 @@ public static class VideoThumbnailService
     /// useful for diagnosing PhotoRec recoveries where headers are partial
     /// or moov atoms are missing.
     /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex DurationLineRegex =
+        new(@"Duration:\s+(\d+):(\d+):(\d+(?:\.\d+)?)",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Extracts the playback duration via ffmpeg. Used as a fallback when
+    /// the Windows Shell property store returns nothing for the file —
+    /// MKV containers in particular often have unread duration metadata
+    /// on PhotoRec recoveries even though ffmpeg can parse them just fine.
+    /// </summary>
+    public static async Task<TimeSpan?> GetDurationAsync(string filePath, CancellationToken ct = default)
+    {
+        string stderr;
+        try { stderr = await ProbeAsync(filePath, ct); }
+        catch { return null; }
+
+        var m = DurationLineRegex.Match(stderr);
+        if (!m.Success) return null;
+        if (!int.TryParse(m.Groups[1].Value, out int h)) return null;
+        if (!int.TryParse(m.Groups[2].Value, out int mi)) return null;
+        if (!double.TryParse(m.Groups[3].Value,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out double s)) return null;
+        return TimeSpan.FromSeconds(h * 3600 + mi * 60 + s);
+    }
+
     public static Task<string> ProbeAsync(string filePath, CancellationToken ct = default) =>
         Task.Run(() =>
         {

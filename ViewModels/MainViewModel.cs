@@ -72,6 +72,10 @@ public class MainViewModel : INotifyPropertyChanged
     private string _sortColumn = nameof(FileRecord.FileName);
     private ListSortDirection _sortDirection = ListSortDirection.Ascending;
     private CancellationTokenSource? _scanCts;
+    // Cancels the duration-backfill pass when the next scan starts so we
+    // don't leave a herd of ffmpeg probes running against files that have
+    // been cleared from _allFiles.
+    private CancellationTokenSource? _durationBackfillCts;
     private IList<SuggestionResult> _currentSuggestions = [];
 
     // ── Suggestion pipeline ──────────────────────────────────────────────────
@@ -801,6 +805,11 @@ public class MainViewModel : INotifyPropertyChanged
             return;
         }
 
+        // Stop any in-flight duration backfill from the previous scan so
+        // its ffmpeg probes don't race with the new scan's I/O.
+        _durationBackfillCts?.Cancel();
+        _durationBackfillCts = null;
+
         ClearResults();
         FolderPath = path;
         IsScanning = true;
@@ -1485,6 +1494,62 @@ public class MainViewModel : INotifyPropertyChanged
         var target = _allFiles.FirstOrDefault(f => f.IsSelected) ?? SelectedFile;
         if (target is null) return;
         OpenInExplorer(target.FullPath);
+    }
+
+    /// <summary>
+    /// Background pass that fills in <see cref="FileRecord.Duration"/> for
+    /// videos the Shell property store couldn't read — typically MKVs from
+    /// PhotoRec recovery. Probes each file with ffmpeg (capped at 3 s per
+    /// file, 4 in parallel) and writes the parsed duration back onto the
+    /// FileRecord, which raises PropertyChanged so the Length cell updates
+    /// live. Cancelled when the next scan starts.
+    /// </summary>
+    public async Task BackfillVideoDurationsAsync()
+    {
+        var pending = _allFiles
+            .Where(f => f.Category == FileCategory.Video && f.Duration is null)
+            .ToList();
+        if (pending.Count == 0) return;
+
+        _durationBackfillCts = new CancellationTokenSource();
+        var ct = _durationBackfillCts.Token;
+
+        int done = 0, found = 0;
+        StatusText = $"Reading video durations… 0 / {pending.Count}";
+
+        var opts = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Math.Min(4, Environment.ProcessorCount),
+            CancellationToken      = ct,
+        };
+
+        try
+        {
+            await Parallel.ForEachAsync(pending, opts, async (record, innerCt) =>
+            {
+                using var perFile = CancellationTokenSource.CreateLinkedTokenSource(innerCt);
+                perFile.CancelAfter(TimeSpan.FromSeconds(3));
+
+                TimeSpan? dur = null;
+                try { dur = await VideoThumbnailService.GetDurationAsync(record.FullPath, perFile.Token); }
+                catch { /* swallowed — bad file shouldn't kill the pass */ }
+
+                int d = System.Threading.Interlocked.Increment(ref done);
+                if (dur is not null)
+                {
+                    System.Threading.Interlocked.Increment(ref found);
+                    Application.Current.Dispatcher.Invoke(() => record.Duration = dur);
+                }
+                if (d % 25 == 0)
+                {
+                    int snapDone = d, snapFound = found, snapTotal = pending.Count;
+                    Application.Current.Dispatcher.Invoke(() =>
+                        StatusText = $"Reading video durations… {snapDone} / {snapTotal} (found {snapFound})");
+                }
+            });
+            StatusText = $"Read durations for {found} of {pending.Count} videos.";
+        }
+        catch (OperationCanceledException) { /* user moved on */ }
     }
 
     private async void DiagnoseSelectedVideo()

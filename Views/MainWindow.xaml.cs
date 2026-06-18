@@ -31,6 +31,11 @@ public partial class MainWindow : Window
                 Vm.RefreshColumnFilterCommand.Execute("Extension");
                 Vm.RefreshColumnFilterCommand.Execute("Category");
                 Vm.RefreshColumnFilterCommand.Execute("Tags");
+                // Run ffmpeg in the background to fill in the Length column
+                // for videos whose duration the Shell couldn't read (common
+                // on MKVs from PhotoRec). Fire-and-forget — cancelled when
+                // the next scan starts.
+                _ = Vm.BackfillVideoDurationsAsync();
             }
             // Scan-for-tags can apply new tag names to existing files; refresh
             // the Tags-column dropdown so newly-applied tags become filterable.
