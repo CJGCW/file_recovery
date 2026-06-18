@@ -96,8 +96,7 @@ public partial class TagManagementWindow : Window
 
     private void RefreshBackfillStatus(int backfilled)
     {
-        int orphan = _rows.Count(r => r.SourceMissing);
-        StatusLine.Text = $"{_rows.Count} tag(s) stored • {orphan} have missing source files • backfilled {backfilled} thumbnail(s)";
+        StatusLine.Text = $"{_rows.Count} tag(s) stored • backfilled {backfilled} thumbnail(s)";
     }
 
     // Re-extracts a thumbnail from the recorded source file. For images we
@@ -143,7 +142,6 @@ public partial class TagManagementWindow : Window
     private bool FilterRow(object obj)
     {
         if (obj is not TagRow r) return false;
-        if (OrphansOnly.IsChecked == true && !r.SourceMissing) return false;
         if (string.IsNullOrEmpty(_filter)) return true;
         return r.TagName.Contains(_filter, StringComparison.OrdinalIgnoreCase)
             || r.SourceFile.Contains(_filter, StringComparison.OrdinalIgnoreCase);
@@ -152,12 +150,6 @@ public partial class TagManagementWindow : Window
     private void FilterBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         _filter = FilterBox.Text?.Trim() ?? string.Empty;
-        CollectionViewSource.GetDefaultView(_rows).Refresh();
-    }
-
-    // Orphans-only checkbox click handler.
-    private void Filter_Changed(object sender, RoutedEventArgs e)
-    {
         CollectionViewSource.GetDefaultView(_rows).Refresh();
     }
 
@@ -282,9 +274,7 @@ public partial class TagManagementWindow : Window
 
     private void RefreshStatus()
     {
-        int total  = _rows.Count;
-        int orphan = _rows.Count(r => r.SourceMissing);
-        StatusLine.Text = $"{total} tag(s) stored • {orphan} have missing source files";
+        StatusLine.Text = $"{_rows.Count} tag(s) stored";
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
