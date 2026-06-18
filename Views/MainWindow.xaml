@@ -682,6 +682,7 @@
           <DataGrid.ContextMenu>
             <ContextMenu>
               <MenuItem Header="Open file location" Command="{Binding OpenLocationCommand}"/>
+              <MenuItem Header="Diagnose video…" Command="{Binding DiagnoseVideoCommand}"/>
               <Separator Style="{StaticResource MenuSeparatorStyle}"/>
               <MenuItem Header="Rename…"  Command="{Binding RenameCommand}"/>
               <MenuItem Header="Move to…" Command="{Binding MoveCommand}"/>

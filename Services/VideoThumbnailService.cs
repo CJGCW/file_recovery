@@ -73,6 +73,51 @@ public static class VideoThumbnailService
         IProgress<double>? progress = null) =>
         Task.Run(() => ScanDeep(filePath, size, ct, onFrame, progress), ct);
 
+    /// <summary>
+    /// Runs `ffmpeg -i filePath` and returns the stderr it prints. ffmpeg
+    /// writes the container/codec summary AND any decode errors to stderr,
+    /// so this is the canonical "why can't I open this video" report —
+    /// useful for diagnosing PhotoRec recoveries where headers are partial
+    /// or moov atoms are missing.
+    /// </summary>
+    public static Task<string> ProbeAsync(string filePath, CancellationToken ct = default) =>
+        Task.Run(() =>
+        {
+            var ffmpegPath = ResolveFfmpegPath();
+            if (ffmpegPath is null) return "(ffmpeg.exe not bundled — cannot probe)";
+
+            var psi = new ProcessStartInfo
+            {
+                FileName               = ffmpegPath,
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                UseShellExecute        = false,
+                CreateNoWindow         = true,
+            };
+            // -hide_banner cuts the 20-line build info; -nostdin so ffmpeg
+            // doesn't hang waiting for a key on damaged files; -i with no
+            // output target makes ffmpeg parse + report what it found and
+            // exit non-zero (which is fine, we only want stderr).
+            psi.ArgumentList.Add("-hide_banner");
+            psi.ArgumentList.Add("-nostdin");
+            psi.ArgumentList.Add("-i");
+            psi.ArgumentList.Add(filePath);
+
+            using var proc = Process.Start(psi);
+            if (proc is null) return "(failed to start ffmpeg)";
+
+            using var reg = ct.Register(() =>
+            {
+                try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
+            });
+
+            string stderr = proc.StandardError.ReadToEnd();
+            try { proc.WaitForExit(5000); } catch { }
+            return string.IsNullOrWhiteSpace(stderr)
+                ? "(ffmpeg returned no output — file may be 0 bytes or unreachable)"
+                : stderr.Trim();
+        }, ct);
+
     private static void ExtractQuickFrames(
         string filePath, int size, CancellationToken ct,
         Action<TimeSpan, BitmapSource> onFrame)

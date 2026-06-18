@@ -279,6 +279,13 @@ public class MainViewModel : INotifyPropertyChanged
         // matching the most common "fix this filter" intent in either direction.
         ToggleAllFileTypesCommand = new RelayCommand(_ => ToggleAllFileTypes());
 
+        // Diagnose: runs `ffmpeg -i <file>` on the selected (or right-clicked)
+        // video and shows the stderr output. Surfaces the actual reason a
+        // file can't be scanned — almost always a PhotoRec recovery with a
+        // partial header, missing moov atom, or unrecognised codec.
+        DiagnoseVideoCommand = new RelayCommand(_ => DiagnoseSelectedVideo(),
+            _ => SelectedFile is not null && SelectedFile.Category == FileCategory.Video);
+
         InitialiseFileTypeGroups();
     }
 
@@ -782,6 +789,7 @@ public class MainViewModel : INotifyPropertyChanged
     public ICommand OpenScanResultsCommand       { get; }
     public ICommand ClearSortCommand             { get; }
     public ICommand ToggleAllFileTypesCommand    { get; }
+    public ICommand DiagnoseVideoCommand         { get; }
 
     // ── Scanning ─────────────────────────────────────────────────────────────
 
@@ -1477,6 +1485,32 @@ public class MainViewModel : INotifyPropertyChanged
         var target = _allFiles.FirstOrDefault(f => f.IsSelected) ?? SelectedFile;
         if (target is null) return;
         OpenInExplorer(target.FullPath);
+    }
+
+    private async void DiagnoseSelectedVideo()
+    {
+        var target = SelectedFile ?? _allFiles.FirstOrDefault(f => f.IsSelected);
+        if (target is null) return;
+        var path = target.FullPath;
+        StatusText = "Probing video with ffmpeg…";
+        string report;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            report = await VideoThumbnailService.ProbeAsync(path, cts.Token);
+        }
+        catch (Exception ex) { report = $"(probe failed: {ex.Message})"; }
+        StatusText = string.Empty;
+
+        var header = $"ffmpeg report for:\n{path}\n\n";
+        var body   = header + report;
+        // MessageBox handles long text awkwardly; trim to something readable
+        // and copy the full thing to clipboard so the user has it verbatim.
+        try { System.Windows.Clipboard.SetText(body); } catch { }
+        MessageBox.Show(
+            body.Length > 4000 ? body[..4000] + "\n…\n(full report copied to clipboard)" : body,
+            "Diagnose video",
+            MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     public static void OpenInExplorer(string path)
