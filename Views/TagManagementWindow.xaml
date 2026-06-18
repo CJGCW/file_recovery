@@ -27,6 +27,7 @@
         <ColumnDefinition Width="Auto"/>
         <ColumnDefinition Width="Auto"/>
         <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="Auto"/>
       </Grid.ColumnDefinitions>
       <TextBox Grid.Column="0" x:Name="FilterBox"
                Background="#252540" Foreground="#E0E0E0"
@@ -53,6 +54,12 @@
         <ComboBoxItem Content="Thumbnail"   Foreground="#E0E0E0" Background="#252540"/>
       </ComboBox>
       <Button Grid.Column="4" Margin="10,0,0,0" Padding="14,6"
+              Content="Add image…"
+              Background="#3A3A5C" Foreground="White"
+              BorderThickness="0" Cursor="Hand"
+              Click="AddImage_Click"
+              ToolTip="Add an image file (poster / logo / portrait) as a tag fingerprint"/>
+      <Button Grid.Column="5" Margin="6,0,0,0" Padding="14,6"
               Content="Delete selected"
               Background="#E06C6C" Foreground="White"
               BorderThickness="0" Cursor="Hand"
