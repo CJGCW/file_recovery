@@ -72,6 +72,10 @@ public class MainViewModel : INotifyPropertyChanged
     private string _sortColumn = nameof(FileRecord.FileName);
     private ListSortDirection _sortDirection = ListSortDirection.Ascending;
     private CancellationTokenSource? _scanCts;
+    // Cancels the duration-backfill pass when the next scan starts so we
+    // don't leave a herd of ffmpeg probes running against files that have
+    // been cleared from _allFiles.
+    private CancellationTokenSource? _durationBackfillCts;
     private IList<SuggestionResult> _currentSuggestions = [];
 
     // ── Suggestion pipeline ──────────────────────────────────────────────────
@@ -82,6 +86,7 @@ public class MainViewModel : INotifyPropertyChanged
     // ── Tagging ──────────────────────────────────────────────────────────────
     private readonly TagStore _tagStore = new();
     private readonly FrameTagStore _frameTagStore = new();
+    private readonly ScannedVideoStore _scannedVideoStore = new();
     private string _newTagText = string.Empty;
     private IList<string> _suggestedTags = [];
 
@@ -277,6 +282,13 @@ public class MainViewModel : INotifyPropertyChanged
         // (all already on) we uncheck everything. One button, two behaviours,
         // matching the most common "fix this filter" intent in either direction.
         ToggleAllFileTypesCommand = new RelayCommand(_ => ToggleAllFileTypes());
+
+        // Diagnose: runs `ffmpeg -i <file>` on the selected (or right-clicked)
+        // video and shows the stderr output. Surfaces the actual reason a
+        // file can't be scanned — almost always a PhotoRec recovery with a
+        // partial header, missing moov atom, or unrecognised codec.
+        DiagnoseVideoCommand = new RelayCommand(_ => DiagnoseSelectedVideo(),
+            _ => SelectedFile is not null && SelectedFile.Category == FileCategory.Video);
 
         InitialiseFileTypeGroups();
     }
@@ -644,6 +656,57 @@ public class MainViewModel : INotifyPropertyChanged
 
     public bool IsTagSuggestionsOpen => TagSuggestions.Count > 0;
 
+    // Size-range filter, in MB. Empty string = no bound on that side.
+    // Stored as strings so the TextBox binding can stay TwoWay even while
+    // the user is mid-typing ("12" → temporarily invalid as a double, etc).
+    private string _minSizeMb = string.Empty;
+    private string _maxSizeMb = string.Empty;
+    private long?  _minSizeBytes;
+    private long?  _maxSizeBytes;
+
+    public string MinSizeMb
+    {
+        get => _minSizeMb;
+        set
+        {
+            var v = value ?? string.Empty;
+            if (_minSizeMb == v) return;          // skip redundant full-grid refresh
+            _minSizeMb = v;
+            _minSizeBytes = ParseMb(_minSizeMb);
+            OnPropertyChanged();
+            RefreshFilter();
+        }
+    }
+
+    public string MaxSizeMb
+    {
+        get => _maxSizeMb;
+        set
+        {
+            var v = value ?? string.Empty;
+            if (_maxSizeMb == v) return;
+            _maxSizeMb = v;
+            _maxSizeBytes = ParseMb(_maxSizeMb);
+            OnPropertyChanged();
+            RefreshFilter();
+        }
+    }
+
+    // Cap at ~8 EB so the explicit (long) cast doesn't overflow on absurdly
+    // large input. Practical max for a file system is way under that.
+    private const double MaxMbValue = long.MaxValue / (1024.0 * 1024.0);
+
+    private static long? ParseMb(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return null;
+        if (!double.TryParse(s.Trim(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out double mb))
+            return null;
+        if (mb < 0) return null;
+        if (mb > MaxMbValue) mb = MaxMbValue;
+        return (long)(mb * 1024 * 1024);
+    }
+
     public string NewTagText
     {
         get => _newTagText;
@@ -781,6 +844,7 @@ public class MainViewModel : INotifyPropertyChanged
     public ICommand OpenScanResultsCommand       { get; }
     public ICommand ClearSortCommand             { get; }
     public ICommand ToggleAllFileTypesCommand    { get; }
+    public ICommand DiagnoseVideoCommand         { get; }
 
     // ── Scanning ─────────────────────────────────────────────────────────────
 
@@ -791,6 +855,11 @@ public class MainViewModel : INotifyPropertyChanged
             StatusText = "Folder not found. Please choose a valid path.";
             return;
         }
+
+        // Stop any in-flight duration backfill from the previous scan so
+        // its ffmpeg probes don't race with the new scan's I/O.
+        _durationBackfillCts?.Cancel();
+        _durationBackfillCts = null;
 
         ClearResults();
         FolderPath = path;
@@ -952,6 +1021,13 @@ public class MainViewModel : INotifyPropertyChanged
                 _selectedByCategory[catIdx] = Math.Max(0, _selectedByCategory[catIdx] - 1);
         }
         record.PropertyChanged -= Record_PropertyChanged;
+        // Drop the persistent deep-scan cache entry for this video — the
+        // file is going away (deleted) or moving (renamed), so the cached
+        // (path → frames) tuple is about to be stale either way. Callers
+        // that rename/move follow up with a fresh Save under the new path
+        // once the next scan runs.
+        if (record.Category == FileCategory.Video)
+            _scannedVideoStore.Remove(record.FullPath);
     }
 
     private void ClearResults()
@@ -1008,6 +1084,8 @@ public class MainViewModel : INotifyPropertyChanged
                 _suggestionService.NotifyFileMoved(
                     record, dest, null, _suggestionCache.GetValueOrDefault(record.Id, []));
                 _tagStore.UpdatePath(oldPath, newPath);
+                if (record.Category == FileCategory.Video)
+                    _scannedVideoStore.Remove(oldPath);
 
                 var info            = new FileInfo(newPath);
                 record.FullPath     = newPath;
@@ -1063,6 +1141,8 @@ public class MainViewModel : INotifyPropertyChanged
                 _suggestionService.NotifyFileMoved(
                     record, targetDir, newName, _suggestionCache.GetValueOrDefault(record.Id, []));
                 _tagStore.UpdatePath(oldPath, newPath);
+                if (record.Category == FileCategory.Video)
+                    _scannedVideoStore.Remove(oldPath);
 
                 record.FullPath   = newPath;
                 record.FileName   = Path.GetFileName(newPath);
@@ -1229,6 +1309,9 @@ public class MainViewModel : INotifyPropertyChanged
             ScanCurrentFile   = string.Empty;
             _scanForTagsCts?.Dispose();
             _scanForTagsCts = null;
+            // Force any buffered hash writes to disk so a crash before the
+            // next save-threshold doesn't lose the batch.
+            _scannedVideoStore.Flush();
         }
 
         // Open the results window once the modal is dismissed.
@@ -1261,8 +1344,26 @@ public class MainViewModel : INotifyPropertyChanged
     {
         if (_frameTagStore.Frames.Count == 0) return [];
 
+        // Fast path: video has already been deep-scanned this session or in
+        // a previous one. Cached whole-frame hashes are good enough to do
+        // dHash matching without re-launching ffmpeg. Crop + embedding
+        // matching requires a fresh scan (we don't cache those), but for
+        // most matches (logos, title cards, distinctive frames) the whole-
+        // frame hash hits first anyway.
+        var cached = _scannedVideoStore.TryGet(record.FullPath);
+        if (cached is not null)
+        {
+            return ScanFromCache(cached, record);
+        }
+
         bool anyEmbeddings = _frameTagStore.Frames.Any(f => f.Embedding is { Length: > 0 });
         var bestPerTag = new Dictionary<string, ScanResult>(StringComparer.OrdinalIgnoreCase);
+        var freshFrames = new List<(TimeSpan Position, ulong Hash)>();
+        // Flips to true only after ScanDeepAsync returns without throwing.
+        // Gates the persistent-cache write so a half-decoded file doesn't
+        // get cached as if it had been fully scanned — that would silently
+        // hide matches in the rest of the video on future runs.
+        bool scanCompletedCleanly = false;
 
         try
         {
@@ -1279,6 +1380,10 @@ public class MainViewModel : INotifyPropertyChanged
                     var whole = PerceptualHashService.Compute(bmp);
                     if (whole != 0)
                     {
+                        // Record for the persistent cache so future tag-scans
+                        // of this video can skip ffmpeg entirely.
+                        freshFrames.Add((pos, whole));
+
                         foreach (var (tag, dist, _) in _frameTagStore.BestDistancePerTag(whole))
                         {
                             if (dist <= FrameTagStore.DefaultMaxDistance)
@@ -1309,6 +1414,7 @@ public class MainViewModel : INotifyPropertyChanged
                         }
                     }
                 });
+            scanCompletedCleanly = true;
         }
         catch (OperationCanceledException)
         {
@@ -1325,6 +1431,43 @@ public class MainViewModel : INotifyPropertyChanged
                 StatusText = $"Tag-scan error on {record.FileName}: {ex.Message}");
         }
 
+        // Persist the freshly computed hashes so the next scan of this video
+        // can hit the cache — but only if ScanDeepAsync returned normally.
+        // Caching a half-decoded video would mask matches in the unscanned
+        // tail forever (until the file's mtime changes).
+        if (scanCompletedCleanly && freshFrames.Count > 0)
+            _scannedVideoStore.Save(record.FullPath, freshFrames);
+
+        return bestPerTag.Values.ToList();
+    }
+
+    // Matches a video's cached whole-frame hashes against every known tag
+    // without touching ffmpeg. No thumbnail can be produced for these hits —
+    // ScanResult.FromCache = true signals the UI to render a "cached" badge
+    // in place of the thumbnail.
+    private IList<ScanResult> ScanFromCache(ScannedVideo cached, FileRecord record)
+    {
+        var bestPerTag = new Dictionary<string, ScanResult>(StringComparer.OrdinalIgnoreCase);
+        foreach (var frame in cached.Frames)
+        {
+            if (frame.Hash == 0) continue;
+            foreach (var (tag, dist, _) in _frameTagStore.BestDistancePerTag(frame.Hash))
+            {
+                if (dist > FrameTagStore.DefaultMaxDistance) continue;
+                if (bestPerTag.TryGetValue(tag, out var existing) && existing.MatchStrength <= dist)
+                    continue;
+                bestPerTag[tag] = new ScanResult
+                {
+                    FilePath           = record.FullPath,
+                    FileName           = record.FileName,
+                    TagName            = tag,
+                    MatchStrength      = dist,
+                    MatchStrengthLabel = $"dHash dist {dist} (cached)",
+                    ThumbnailPng       = null,
+                    FromCache          = true,
+                };
+            }
+        }
         return bestPerTag.Values.ToList();
     }
 
@@ -1422,6 +1565,89 @@ public class MainViewModel : INotifyPropertyChanged
         var target = _allFiles.FirstOrDefault(f => f.IsSelected) ?? SelectedFile;
         if (target is null) return;
         OpenInExplorer(target.FullPath);
+    }
+
+    /// <summary>
+    /// Background pass that fills in <see cref="FileRecord.Duration"/> for
+    /// videos the Shell property store couldn't read — typically MKVs from
+    /// PhotoRec recovery. Probes each file with ffmpeg (capped at 3 s per
+    /// file, 4 in parallel) and writes the parsed duration back onto the
+    /// FileRecord, which raises PropertyChanged so the Length cell updates
+    /// live. Cancelled when the next scan starts.
+    /// </summary>
+    public async Task BackfillVideoDurationsAsync()
+    {
+        var pending = _allFiles
+            .Where(f => f.Category == FileCategory.Video && f.Duration is null)
+            .ToList();
+        if (pending.Count == 0) return;
+
+        _durationBackfillCts?.Dispose();   // tiny leak if we just overwrite
+        _durationBackfillCts = new CancellationTokenSource();
+        var ct = _durationBackfillCts.Token;
+
+        int done = 0, found = 0;
+        StatusText = $"Reading video durations… 0 / {pending.Count}";
+
+        var opts = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Math.Min(4, Environment.ProcessorCount),
+            CancellationToken      = ct,
+        };
+
+        try
+        {
+            await Parallel.ForEachAsync(pending, opts, async (record, innerCt) =>
+            {
+                using var perFile = CancellationTokenSource.CreateLinkedTokenSource(innerCt);
+                perFile.CancelAfter(TimeSpan.FromSeconds(3));
+
+                TimeSpan? dur = null;
+                try { dur = await VideoThumbnailService.GetDurationAsync(record.FullPath, perFile.Token); }
+                catch { /* swallowed — bad file shouldn't kill the pass */ }
+
+                int d = System.Threading.Interlocked.Increment(ref done);
+                if (dur is not null)
+                {
+                    System.Threading.Interlocked.Increment(ref found);
+                    Application.Current.Dispatcher.Invoke(() => record.Duration = dur);
+                }
+                if (d % 25 == 0)
+                {
+                    int snapDone = d, snapFound = found, snapTotal = pending.Count;
+                    Application.Current.Dispatcher.Invoke(() =>
+                        StatusText = $"Reading video durations… {snapDone} / {snapTotal} (found {snapFound})");
+                }
+            });
+            StatusText = $"Read durations for {found} of {pending.Count} videos.";
+        }
+        catch (OperationCanceledException) { /* user moved on */ }
+    }
+
+    private async void DiagnoseSelectedVideo()
+    {
+        var target = SelectedFile ?? _allFiles.FirstOrDefault(f => f.IsSelected);
+        if (target is null) return;
+        var path = target.FullPath;
+        StatusText = "Probing video with ffmpeg…";
+        string report;
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            report = await VideoThumbnailService.ProbeAsync(path, cts.Token);
+        }
+        catch (Exception ex) { report = $"(probe failed: {ex.Message})"; }
+        StatusText = string.Empty;
+
+        var header = $"ffmpeg report for:\n{path}\n\n";
+        var body   = header + report;
+        // MessageBox handles long text awkwardly; trim to something readable
+        // and copy the full thing to clipboard so the user has it verbatim.
+        try { System.Windows.Clipboard.SetText(body); } catch { }
+        MessageBox.Show(
+            body.Length > 4000 ? body[..4000] + "\n…\n(full report copied to clipboard)" : body,
+            "Diagnose video",
+            MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     public static void OpenInExplorer(string path)
@@ -1811,11 +2037,14 @@ public class MainViewModel : INotifyPropertyChanged
 
         try
         {
+            var oldPath = record.FullPath;
             Directory.CreateDirectory(destDir);
-            File.Move(record.FullPath, newPath);
+            File.Move(oldPath, newPath);
 
             _suggestionService.NotifyFileMoved(
                 record, destDir, newName, _suggestionCache.GetValueOrDefault(record.Id, []));
+            if (record.Category == FileCategory.Video)
+                _scannedVideoStore.Remove(oldPath);
 
             var info            = new FileInfo(newPath);
             record.FullPath     = newPath;
@@ -2117,14 +2346,62 @@ public class MainViewModel : INotifyPropertyChanged
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    // Matches "<base> (N)" so we can strip an explicit numeric suffix the
+    // user may have typed and treat all "name", "name (1)", "name (2)" as
+    // one family.
+    private static readonly System.Text.RegularExpressions.Regex NumberedSuffixPattern =
+        new(@"^(.+?)\s+\((\d+)\)$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// Pick a free path by continuing the "(N)" numbering from the highest N
+    /// already present in the directory — not by filling the lowest gap.
+    /// Example: with "X.mkv", "X (1).mkv", "X (5).mkv" present, renaming a
+    /// new file to "X.mkv" produces "X (6).mkv" (not "X (2).mkv"). Avoids
+    /// recycling indices the user has previously used.
+    /// </summary>
+    // Cache compiled "<name> (N)<ext>" regexes per family. Bulk renames into
+    // the same family (e.g. ExecuteRename across 500 files all renaming to
+    // "X") otherwise re-compile the same pattern N times — measurable on
+    // large recovery dirs.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string, string), System.Text.RegularExpressions.Regex>
+        NumberedFamilyRegexCache = new();
+
     private static string MakeUniquePath(string path)
     {
         var dir  = Path.GetDirectoryName(path)!;
         var name = Path.GetFileNameWithoutExtension(path);
         var ext  = Path.GetExtension(path);
-        int n    = 1;
+
+        // Strip a trailing "(N)" so the user typing "X (1).mkv" still
+        // continues the X family — they don't end up with "X (1) (2).mkv".
+        var stripped = NumberedSuffixPattern.Match(name);
+        if (stripped.Success) name = stripped.Groups[1].Value;
+
+        var pattern = NumberedFamilyRegexCache.GetOrAdd((name, ext), key =>
+            new System.Text.RegularExpressions.Regex(
+                @"^" + System.Text.RegularExpressions.Regex.Escape(key.Item1) + @"\s+\((\d+)\)" +
+                System.Text.RegularExpressions.Regex.Escape(key.Item2) + @"$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+                System.Text.RegularExpressions.RegexOptions.Compiled));
+
+        int highest = 0;
+        try
+        {
+            foreach (var existing in Directory.EnumerateFiles(dir))
+            {
+                var match = pattern.Match(Path.GetFileName(existing));
+                if (match.Success && int.TryParse(match.Groups[1].Value, out int n) && n > highest)
+                    highest = n;
+            }
+        }
+        catch { /* permission / IO error — fall through, next index is highest+1=1 */ }
+
+        // Continue from highest + 1. The While loop is a last-resort guard
+        // against a concurrent write that lands between our scan and the
+        // File.Move caller — never expected to iterate in practice.
+        int next = highest + 1;
         string candidate;
-        do { candidate = Path.Combine(dir, $"{name} ({n++}){ext}"); }
+        do { candidate = Path.Combine(dir, $"{name} ({next++}){ext}"); }
         while (File.Exists(candidate));
         return candidate;
     }
@@ -2196,6 +2473,10 @@ public class MainViewModel : INotifyPropertyChanged
         // all-checked, see the cache-build comment above).
         if (_filterAllowedExtensions!.Count > 0 && !_filterAllowedExtensions.Contains(r.Extension))
             return false;
+
+        // Size range (MB → bytes). Either bound is optional.
+        if (_minSizeBytes is long lo && r.FileSizeBytes < lo) return false;
+        if (_maxSizeBytes is long hi && r.FileSizeBytes > hi) return false;
 
         if (r.Category == FileCategory.Image && _filterAllowedImageGroups!.Count > 0
             && !_filterAllowedImageGroups.Contains(r.ImageGroup))
@@ -2567,21 +2848,35 @@ public class MainViewModel : INotifyPropertyChanged
         StatusText       = "Deep scanning...";
         var progress = new Progress<double>(p => DeepScanProgress = p);
         int added = 0;
+        // Accumulated on the scan thread (not UI thread) so we can persist
+        // a single batch at the end. ConcurrentBag would be overkill — the
+        // VideoThumbnailService callback is invoked serially from one
+        // worker thread.
+        var freshFrames = new List<(TimeSpan Position, ulong Hash)>();
         try
         {
             await VideoThumbnailService.ScanDeepAsync(
                 record.FullPath, 420, ct,
-                (pos, bmp) => Application.Current.Dispatcher.Invoke(() =>
+                (pos, bmp) =>
                 {
-                    if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
+                    // Side-channel: compute the hash off the UI thread and
+                    // tuck it away for the persistent cache before we hop
+                    // the dispatcher for the strip update.
+                    var hash = PerceptualHashService.Compute(bmp);
+                    if (hash != 0) freshFrames.Add((pos, hash));
 
-                    // Insert chronologically; skip if a frame at this exact position already exists.
-                    int idx = 0;
-                    while (idx < ThumbnailStrip.Count && ThumbnailStrip[idx].Position < pos) idx++;
-                    if (idx < ThumbnailStrip.Count && ThumbnailStrip[idx].Position == pos) return;
-                    ThumbnailStrip.Insert(idx, new VideoFrame(bmp, pos));
-                    added++;
-                }),
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
+
+                        // Insert chronologically; skip if a frame at this exact position already exists.
+                        int idx = 0;
+                        while (idx < ThumbnailStrip.Count && ThumbnailStrip[idx].Position < pos) idx++;
+                        if (idx < ThumbnailStrip.Count && ThumbnailStrip[idx].Position == pos) return;
+                        ThumbnailStrip.Insert(idx, new VideoFrame(bmp, pos));
+                        added++;
+                    });
+                },
                 progress);
             if (ct.IsCancellationRequested || SelectedFile?.Id != record.Id) return;
 
@@ -2593,6 +2888,11 @@ public class MainViewModel : INotifyPropertyChanged
             // post-deep-scan strip without rescanning.
             if (ThumbnailStrip.Count > 0)
                 _scanCache[record.FullPath] = ThumbnailStrip.ToList();
+
+            // Persist the whole-frame hashes so a later scan-for-tags of this
+            // video can skip ffmpeg entirely.
+            if (freshFrames.Count > 0)
+                _scannedVideoStore.Save(record.FullPath, freshFrames);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { StatusText = $"Deep scan failed: {ex.Message}"; }
@@ -2603,6 +2903,7 @@ public class MainViewModel : INotifyPropertyChanged
                 IsDeepScanning   = false;
                 DeepScanProgress = 0;
             }
+            _scannedVideoStore.Flush();
         }
     }
 
@@ -2931,7 +3232,16 @@ public class MainViewModel : INotifyPropertyChanged
             if (!byCategory.TryGetValue(cat, out var exts)) continue;
 
             var group = new CategoryExtensionGroup(cat, CategoryLabel(cat),
-                onGroupChanged: () => RefreshFilter());
+                onGroupChanged: () =>
+                {
+                    // Notify HasUncheckedFileType so the sidebar
+                    // "Select all" / "Deselect all" toggle's label flips
+                    // immediately when an individual extension is checked
+                    // or unchecked — otherwise the label stays stale and
+                    // the next click looks like it's doing the wrong thing.
+                    OnPropertyChanged(nameof(HasUncheckedFileType));
+                    RefreshFilter();
+                });
 
             foreach (var ext in exts)
                 group.AddExtension(ext);

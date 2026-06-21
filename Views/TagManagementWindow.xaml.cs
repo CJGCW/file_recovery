@@ -96,8 +96,7 @@ public partial class TagManagementWindow : Window
 
     private void RefreshBackfillStatus(int backfilled)
     {
-        int orphan = _rows.Count(r => r.SourceMissing);
-        StatusLine.Text = $"{_rows.Count} tag(s) stored • {orphan} have missing source files • backfilled {backfilled} thumbnail(s)";
+        StatusLine.Text = $"{_rows.Count} tag(s) stored • backfilled {backfilled} thumbnail(s)";
     }
 
     // Re-extracts a thumbnail from the recorded source file. For images we
@@ -143,7 +142,6 @@ public partial class TagManagementWindow : Window
     private bool FilterRow(object obj)
     {
         if (obj is not TagRow r) return false;
-        if (OrphansOnly.IsChecked == true && !r.SourceMissing) return false;
         if (string.IsNullOrEmpty(_filter)) return true;
         return r.TagName.Contains(_filter, StringComparison.OrdinalIgnoreCase)
             || r.SourceFile.Contains(_filter, StringComparison.OrdinalIgnoreCase);
@@ -152,12 +150,6 @@ public partial class TagManagementWindow : Window
     private void FilterBox_TextChanged(object sender, TextChangedEventArgs e)
     {
         _filter = FilterBox.Text?.Trim() ?? string.Empty;
-        CollectionViewSource.GetDefaultView(_rows).Refresh();
-    }
-
-    // Orphans-only checkbox click handler.
-    private void Filter_Changed(object sender, RoutedEventArgs e)
-    {
         CollectionViewSource.GetDefaultView(_rows).Refresh();
     }
 
@@ -181,6 +173,78 @@ public partial class TagManagementWindow : Window
         };
         if (path is not null)
             view.GroupDescriptions.Add(new PropertyGroupDescription(path));
+    }
+
+    // "Add image…" button. Picks an image off disk, prompts for a tag name,
+    // hashes the pixels into a TaggedFrame, and stores it. The tag then
+    // participates in scan-for-tags exactly like a frame the user captured
+    // from a video — useful for tagging films by poster image, characters
+    // by portrait, brands by logo, etc.
+    private void AddImage_Click(object sender, RoutedEventArgs e)
+    {
+        var pick = new Microsoft.Win32.OpenFileDialog
+        {
+            Title  = "Pick an image to use as a tag fingerprint",
+            Filter = "Images (jpg, png, gif, bmp, webp, tif)|*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.webp;*.tif;*.tiff",
+        };
+        if (pick.ShowDialog(this) != true) return;
+        var imagePath = pick.FileName;
+
+        var nameDlg = new TagInputDialog(
+            prompt:  "Tag name for this image:",
+            initial: System.IO.Path.GetFileNameWithoutExtension(imagePath))
+        {
+            Owner = this,
+        };
+        if (nameDlg.ShowDialog() != true) return;
+        var tagName = nameDlg.TagName?.Trim();
+        if (string.IsNullOrEmpty(tagName)) return;
+
+        try
+        {
+            // Decode at 420 px so dHash sees a representative thumbnail and
+            // the PNG bytes we store don't bloat from a 24-megapixel source.
+            var img = new BitmapImage();
+            img.BeginInit();
+            img.CacheOption      = BitmapCacheOption.OnLoad;
+            img.DecodePixelWidth = 420;
+            img.UriSource        = new Uri(imagePath);
+            img.EndInit();
+            img.Freeze();
+
+            var hash = PerceptualHashService.Compute(img);
+            if (hash == 0)
+            {
+                MessageBox.Show(
+                    "Could not compute a perceptual hash for that image — it may be unreadable or fully transparent.",
+                    "Add image tag", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // Encode the decoded BitmapImage straight to PNG bytes for storage.
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(img));
+            using var ms = new MemoryStream();
+            encoder.Save(ms);
+            var thumbPng = ms.ToArray();
+
+            var frame = _store.Add(hash, tagName, imagePath, TimeSpan.Zero,
+                                   embedding: null, thumbnailPng: thumbPng);
+            if (frame is null) return;
+
+            // Surface in the grid immediately so the user can verify the
+            // thumbnail rendered and tweak the name if needed.
+            var row = new TagRow(frame);
+            _rows.Add(row);
+            TagsGrid.SelectedItem = row;
+            TagsGrid.ScrollIntoView(row);
+            RefreshStatus();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to add image: {ex.Message}", "Add image tag",
+                            MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void DeleteOne_Click(object sender, RoutedEventArgs e)
@@ -210,9 +274,7 @@ public partial class TagManagementWindow : Window
 
     private void RefreshStatus()
     {
-        int total  = _rows.Count;
-        int orphan = _rows.Count(r => r.SourceMissing);
-        StatusLine.Text = $"{total} tag(s) stored • {orphan} have missing source files";
+        StatusLine.Text = $"{_rows.Count} tag(s) stored";
     }
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();

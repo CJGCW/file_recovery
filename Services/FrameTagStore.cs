@@ -35,25 +35,34 @@ public class FrameTagStore
 
     public const float DefaultCosineThreshold = 0.4f;
 
-    public void Add(ulong hash, string tagName, string sourceFile, TimeSpan position,
-                    float[]? embedding = null, byte[]? thumbnailPng = null)
+    /// <summary>
+    /// Persists a new TaggedFrame and returns it (or null if the inputs were
+    /// invalid). Returning the instance lets UI callers append it to their
+    /// row list directly instead of having to look it up by Last(), which
+    /// would race against concurrent auto-apply during a scan-for-tags run.
+    /// </summary>
+    public TaggedFrame? Add(ulong hash, string tagName, string sourceFile, TimeSpan position,
+                            float[]? embedding = null, byte[]? thumbnailPng = null)
     {
-        if (string.IsNullOrWhiteSpace(tagName)) return;
-        if (hash == 0 && embedding is null) return;
+        if (string.IsNullOrWhiteSpace(tagName)) return null;
+        if (hash == 0 && embedding is null) return null;
+
+        var frame = new TaggedFrame
+        {
+            Hash                  = hash,
+            TagName               = tagName.Trim(),
+            SourceFile            = sourceFile,
+            SourcePositionSeconds = position.TotalSeconds,
+            AddedAt               = DateTime.UtcNow,
+            Embedding             = embedding,
+            ThumbnailPng          = thumbnailPng,
+        };
         lock (_lock)
         {
-            Frames.Add(new TaggedFrame
-            {
-                Hash                  = hash,
-                TagName               = tagName.Trim(),
-                SourceFile            = sourceFile,
-                SourcePositionSeconds = position.TotalSeconds,
-                AddedAt               = DateTime.UtcNow,
-                Embedding             = embedding,
-                ThumbnailPng          = thumbnailPng,
-            });
+            Frames.Add(frame);
             Save();
         }
+        return frame;
     }
 
     public void Remove(TaggedFrame frame)

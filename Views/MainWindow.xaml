@@ -20,23 +20,45 @@
     <cv:DurationConverter              x:Key="DurationConverter"/>
     <cv:StringToBrushConverter         x:Key="StringToBrush"/>
 
-    <!-- DataGrid row style with hover/select -->
+    <!-- DataGrid row style with hover/select. A custom template gives us
+         an accent-coloured left bar that's painted only when the row is the
+         focused selection — much more visible than just a background tint
+         against the already-dark BgDark surface. -->
     <Style TargetType="DataGridRow">
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="Foreground" Value="{StaticResource TextPrimary}"/>
-      <Setter Property="BorderThickness" Value="0,0,0,0"/>
+      <!-- Reserve a 3-pixel slot on the left of every row so the IsSelected
+           trigger can paint an accent stripe there without re-laying-out. -->
+      <Setter Property="BorderThickness" Value="3,0,0,0"/>
+      <Setter Property="BorderBrush" Value="Transparent"/>
       <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="DataGridRow">
+            <Border Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    SnapsToDevicePixels="True">
+              <DataGridCellsPresenter ItemsPanel="{TemplateBinding ItemsPanel}"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
       <Style.Triggers>
-        <!-- Checkbox-selected (bulk selection) — subtle tint -->
+        <!-- Checkbox-selected (bulk selection) — subtle tint, no left bar. -->
         <DataTrigger Binding="{Binding IsSelected}" Value="True">
-          <Setter Property="Background" Value="#282848"/>
+          <Setter Property="Background" Value="#2F2F55"/>
         </DataTrigger>
         <Trigger Property="IsMouseOver" Value="True">
           <Setter Property="Background" Value="{StaticResource RowHover}"/>
         </Trigger>
-        <!-- Preview-selected row -->
+        <!-- Focus-selected row: brighter purple background + accent left bar.
+             This is the trigger that actually highlights the "selected" row
+             the user just clicked. Wins over the DataTrigger above because
+             it comes later in document order. -->
         <Trigger Property="IsSelected" Value="True">
-          <Setter Property="Background" Value="{StaticResource SelectedRow}"/>
+          <Setter Property="Background" Value="#3F3680"/>
+          <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
         </Trigger>
       </Style.Triggers>
     </Style>
@@ -145,6 +167,31 @@
                        Foreground="{StaticResource TextSecondary}" Margin="0,12,0,8"/>
             <TextBox Text="{Binding ExcludedFolderNames, UpdateSourceTrigger=PropertyChanged}"
                      ToolTip="Comma-separated folder names to skip during scan (matched by name, case-insensitive). Default: rec"/>
+
+            <!-- Size range (MB). Either bound is optional; blank = no limit. -->
+            <TextBlock Text="SIZE (MB)" FontSize="10" FontWeight="SemiBold"
+                       Foreground="{StaticResource TextSecondary}" Margin="0,12,0,8"/>
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="6"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+              </Grid.RowDefinitions>
+              <TextBlock Grid.Row="0" Grid.Column="0" Text="min" FontSize="9"
+                         Foreground="{StaticResource TextSecondary}" Margin="0,0,0,2"/>
+              <TextBlock Grid.Row="0" Grid.Column="2" Text="max" FontSize="9"
+                         Foreground="{StaticResource TextSecondary}" Margin="0,0,0,2"/>
+              <TextBox Grid.Row="1" Grid.Column="0"
+                       Text="{Binding MinSizeMb, UpdateSourceTrigger=PropertyChanged}"
+                       ToolTip="Minimum file size in MB (blank = no minimum)"/>
+              <TextBox Grid.Row="1" Grid.Column="2"
+                       Text="{Binding MaxSizeMb, UpdateSourceTrigger=PropertyChanged}"
+                       ToolTip="Maximum file size in MB (blank = no maximum)"/>
+            </Grid>
 
             <!-- Delete mode pill toggle. Turns the Scan button below into a bulk-delete button. -->
             <CheckBox Margin="0,10,0,0"
@@ -660,6 +707,7 @@
           <DataGrid.ContextMenu>
             <ContextMenu>
               <MenuItem Header="Open file location" Command="{Binding OpenLocationCommand}"/>
+              <MenuItem Header="Diagnose video…" Command="{Binding DiagnoseVideoCommand}"/>
               <Separator Style="{StaticResource MenuSeparatorStyle}"/>
               <MenuItem Header="Rename…"  Command="{Binding RenameCommand}"/>
               <MenuItem Header="Move to…" Command="{Binding MoveCommand}"/>
@@ -703,19 +751,24 @@
               </DataGridTemplateColumn.CellTemplate>
             </DataGridTemplateColumn>
 
-            <!-- Checkbox -->
+            <!-- Checkbox. Explicit Width/Height/Margin override the global
+                 CheckBox style's "Margin=0,2" which squashed the box inside
+                 the tight 36-pixel column header. -->
             <DataGridTemplateColumn Width="36" CanUserResize="False">
               <DataGridTemplateColumn.HeaderTemplate>
                 <DataTemplate>
-                  <CheckBox IsThreeState="True" HorizontalAlignment="Center"
+                  <CheckBox IsThreeState="True"
+                            HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Width="18" Height="18" Margin="0"
                             IsChecked="{Binding DataContext.AllSelected, Mode=TwoWay,
                                         RelativeSource={RelativeSource AncestorType=DataGrid}}"/>
                 </DataTemplate>
               </DataGridTemplateColumn.HeaderTemplate>
               <DataGridTemplateColumn.CellTemplate>
                 <DataTemplate>
-                  <CheckBox IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"
-                            HorizontalAlignment="Center"/>
+                  <CheckBox HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Width="18" Height="18" Margin="0"
+                            IsChecked="{Binding IsSelected, UpdateSourceTrigger=PropertyChanged}"/>
                 </DataTemplate>
               </DataGridTemplateColumn.CellTemplate>
             </DataGridTemplateColumn>

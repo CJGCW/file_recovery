@@ -10,6 +10,7 @@ public class FileRecord : INotifyPropertyChanged
     private string   _fileName      = string.Empty;
     private DateTime? _lastModified;
     private bool     _isSelected;
+    private TimeSpan? _duration;
 
     public long   Id               { get; set; }
     public string Extension        { get; set; } = string.Empty;
@@ -19,9 +20,20 @@ public class FileRecord : INotifyPropertyChanged
     public DateTime ScannedAt      { get; set; } = DateTime.UtcNow;
     public string?          DocumentTitle   { get; set; }
     public DocumentContent? DocumentContent { get; set; }
-    public TimeSpan?        Duration        { get; set; }
     public VideoInfo?       VideoInfo       { get; set; }
     public ImageSubcategory ImageGroup      { get; set; }
+
+    /// <summary>
+    /// Backed by INPC so the Length column updates live when a background
+    /// duration-backfill pass populates it after the initial scan finished.
+    /// (Shell often returns nothing for MKV durations on PhotoRec output —
+    /// the backfill runs ffmpeg as a fallback and writes back here.)
+    /// </summary>
+    public TimeSpan? Duration
+    {
+        get => _duration;
+        set { _duration = value; OnPropertyChanged(); }
+    }
     public ObservableCollection<TagDefinition>  Tags           { get; } = [];
     public ObservableCollection<SearchPattern>  MatchedPatterns { get; } = [];
 
