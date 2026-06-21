@@ -669,7 +669,9 @@ public class MainViewModel : INotifyPropertyChanged
         get => _minSizeMb;
         set
         {
-            _minSizeMb = value ?? string.Empty;
+            var v = value ?? string.Empty;
+            if (_minSizeMb == v) return;          // skip redundant full-grid refresh
+            _minSizeMb = v;
             _minSizeBytes = ParseMb(_minSizeMb);
             OnPropertyChanged();
             RefreshFilter();
@@ -681,12 +683,18 @@ public class MainViewModel : INotifyPropertyChanged
         get => _maxSizeMb;
         set
         {
-            _maxSizeMb = value ?? string.Empty;
+            var v = value ?? string.Empty;
+            if (_maxSizeMb == v) return;
+            _maxSizeMb = v;
             _maxSizeBytes = ParseMb(_maxSizeMb);
             OnPropertyChanged();
             RefreshFilter();
         }
     }
+
+    // Cap at ~8 EB so the explicit (long) cast doesn't overflow on absurdly
+    // large input. Practical max for a file system is way under that.
+    private const double MaxMbValue = long.MaxValue / (1024.0 * 1024.0);
 
     private static long? ParseMb(string s)
     {
@@ -695,6 +703,7 @@ public class MainViewModel : INotifyPropertyChanged
                 System.Globalization.CultureInfo.InvariantCulture, out double mb))
             return null;
         if (mb < 0) return null;
+        if (mb > MaxMbValue) mb = MaxMbValue;
         return (long)(mb * 1024 * 1024);
     }
 
@@ -1012,6 +1021,13 @@ public class MainViewModel : INotifyPropertyChanged
                 _selectedByCategory[catIdx] = Math.Max(0, _selectedByCategory[catIdx] - 1);
         }
         record.PropertyChanged -= Record_PropertyChanged;
+        // Drop the persistent deep-scan cache entry for this video — the
+        // file is going away (deleted) or moving (renamed), so the cached
+        // (path → frames) tuple is about to be stale either way. Callers
+        // that rename/move follow up with a fresh Save under the new path
+        // once the next scan runs.
+        if (record.Category == FileCategory.Video)
+            _scannedVideoStore.Remove(record.FullPath);
     }
 
     private void ClearResults()
@@ -1068,6 +1084,8 @@ public class MainViewModel : INotifyPropertyChanged
                 _suggestionService.NotifyFileMoved(
                     record, dest, null, _suggestionCache.GetValueOrDefault(record.Id, []));
                 _tagStore.UpdatePath(oldPath, newPath);
+                if (record.Category == FileCategory.Video)
+                    _scannedVideoStore.Remove(oldPath);
 
                 var info            = new FileInfo(newPath);
                 record.FullPath     = newPath;
@@ -1123,6 +1141,8 @@ public class MainViewModel : INotifyPropertyChanged
                 _suggestionService.NotifyFileMoved(
                     record, targetDir, newName, _suggestionCache.GetValueOrDefault(record.Id, []));
                 _tagStore.UpdatePath(oldPath, newPath);
+                if (record.Category == FileCategory.Video)
+                    _scannedVideoStore.Remove(oldPath);
 
                 record.FullPath   = newPath;
                 record.FileName   = Path.GetFileName(newPath);
@@ -1289,6 +1309,9 @@ public class MainViewModel : INotifyPropertyChanged
             ScanCurrentFile   = string.Empty;
             _scanForTagsCts?.Dispose();
             _scanForTagsCts = null;
+            // Force any buffered hash writes to disk so a crash before the
+            // next save-threshold doesn't lose the batch.
+            _scannedVideoStore.Flush();
         }
 
         // Open the results window once the modal is dismissed.
@@ -1336,6 +1359,11 @@ public class MainViewModel : INotifyPropertyChanged
         bool anyEmbeddings = _frameTagStore.Frames.Any(f => f.Embedding is { Length: > 0 });
         var bestPerTag = new Dictionary<string, ScanResult>(StringComparer.OrdinalIgnoreCase);
         var freshFrames = new List<(TimeSpan Position, ulong Hash)>();
+        // Flips to true only after ScanDeepAsync returns without throwing.
+        // Gates the persistent-cache write so a half-decoded file doesn't
+        // get cached as if it had been fully scanned — that would silently
+        // hide matches in the rest of the video on future runs.
+        bool scanCompletedCleanly = false;
 
         try
         {
@@ -1386,6 +1414,7 @@ public class MainViewModel : INotifyPropertyChanged
                         }
                     }
                 });
+            scanCompletedCleanly = true;
         }
         catch (OperationCanceledException)
         {
@@ -1403,10 +1432,10 @@ public class MainViewModel : INotifyPropertyChanged
         }
 
         // Persist the freshly computed hashes so the next scan of this video
-        // can hit the cache. Only save when we have a complete (or near-
-        // complete) set; an empty list means the scan failed before yielding
-        // any frame and we don't want to mask a future retry with junk data.
-        if (freshFrames.Count > 0)
+        // can hit the cache — but only if ScanDeepAsync returned normally.
+        // Caching a half-decoded video would mask matches in the unscanned
+        // tail forever (until the file's mtime changes).
+        if (scanCompletedCleanly && freshFrames.Count > 0)
             _scannedVideoStore.Save(record.FullPath, freshFrames);
 
         return bestPerTag.Values.ToList();
@@ -1553,6 +1582,7 @@ public class MainViewModel : INotifyPropertyChanged
             .ToList();
         if (pending.Count == 0) return;
 
+        _durationBackfillCts?.Dispose();   // tiny leak if we just overwrite
         _durationBackfillCts = new CancellationTokenSource();
         var ct = _durationBackfillCts.Token;
 
@@ -2007,11 +2037,14 @@ public class MainViewModel : INotifyPropertyChanged
 
         try
         {
+            var oldPath = record.FullPath;
             Directory.CreateDirectory(destDir);
-            File.Move(record.FullPath, newPath);
+            File.Move(oldPath, newPath);
 
             _suggestionService.NotifyFileMoved(
                 record, destDir, newName, _suggestionCache.GetValueOrDefault(record.Id, []));
+            if (record.Category == FileCategory.Video)
+                _scannedVideoStore.Remove(oldPath);
 
             var info            = new FileInfo(newPath);
             record.FullPath     = newPath;
@@ -2326,6 +2359,13 @@ public class MainViewModel : INotifyPropertyChanged
     /// new file to "X.mkv" produces "X (6).mkv" (not "X (2).mkv"). Avoids
     /// recycling indices the user has previously used.
     /// </summary>
+    // Cache compiled "<name> (N)<ext>" regexes per family. Bulk renames into
+    // the same family (e.g. ExecuteRename across 500 files all renaming to
+    // "X") otherwise re-compile the same pattern N times — measurable on
+    // large recovery dirs.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string, string), System.Text.RegularExpressions.Regex>
+        NumberedFamilyRegexCache = new();
+
     private static string MakeUniquePath(string path)
     {
         var dir  = Path.GetDirectoryName(path)!;
@@ -2337,11 +2377,14 @@ public class MainViewModel : INotifyPropertyChanged
         var stripped = NumberedSuffixPattern.Match(name);
         if (stripped.Success) name = stripped.Groups[1].Value;
 
+        var pattern = NumberedFamilyRegexCache.GetOrAdd((name, ext), key =>
+            new System.Text.RegularExpressions.Regex(
+                @"^" + System.Text.RegularExpressions.Regex.Escape(key.Item1) + @"\s+\((\d+)\)" +
+                System.Text.RegularExpressions.Regex.Escape(key.Item2) + @"$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+                System.Text.RegularExpressions.RegexOptions.Compiled));
+
         int highest = 0;
-        var pattern = new System.Text.RegularExpressions.Regex(
-            @"^" + System.Text.RegularExpressions.Regex.Escape(name) + @"\s+\((\d+)\)" +
-            System.Text.RegularExpressions.Regex.Escape(ext) + @"$",
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         try
         {
             foreach (var existing in Directory.EnumerateFiles(dir))
@@ -2860,6 +2903,7 @@ public class MainViewModel : INotifyPropertyChanged
                 IsDeepScanning   = false;
                 DeepScanProgress = 0;
             }
+            _scannedVideoStore.Flush();
         }
     }
 

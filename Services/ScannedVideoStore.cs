@@ -32,6 +32,15 @@ public class ScannedVideoStore
     private Dictionary<string, ScannedVideo> _byPath =
         new(StringComparer.OrdinalIgnoreCase);
 
+    // Batch writes: a tag-scan run can call Save() N times. Rewriting the
+    // full JSON each time = N × file_size disk writes. Instead we accumulate
+    // in memory and flush every PersistEveryNSaves OR every PersistInterval,
+    // whichever fires first. Callers can force a flush via Flush().
+    private const int PersistEveryNSaves = 25;
+    private static readonly TimeSpan PersistInterval = TimeSpan.FromSeconds(10);
+    private int      _unflushed;
+    private DateTime _lastFlushUtc = DateTime.UtcNow;
+
     public ScannedVideoStore()
     {
         var dir = Path.Combine(
@@ -100,24 +109,43 @@ public class ScannedVideoStore
         lock (_lock)
         {
             _byPath[fullPath] = entry;
-            PersistLocked();
+            _unflushed++;
+            if (_unflushed >= PersistEveryNSaves ||
+                DateTime.UtcNow - _lastFlushUtc >= PersistInterval)
+            {
+                PersistLocked();
+                _unflushed = 0;
+                _lastFlushUtc = DateTime.UtcNow;
+            }
         }
     }
 
-    /// <summary>Drop the cached entry for a single path, e.g. after a delete.</summary>
+    /// <summary>Drop the cached entry for a single path, e.g. after a delete
+    /// or move. Persists immediately so the catalog doesn't grow with stale
+    /// entries.</summary>
     public void Remove(string fullPath)
     {
         lock (_lock)
         {
-            if (_byPath.Remove(fullPath))
-                PersistLocked();
+            if (!_byPath.Remove(fullPath)) return;
+            PersistLocked();
+            _unflushed = 0;
+            _lastFlushUtc = DateTime.UtcNow;
         }
     }
 
-    /// <summary>Total cached video count. Cheap, for status display.</summary>
-    public int CachedVideoCount
+    /// <summary>Force any buffered saves to disk. Call this at the end of a
+    /// batch operation (e.g. after a scan-for-tags run) so a crash before
+    /// the next threshold-fire doesn't lose the buffered entries.</summary>
+    public void Flush()
     {
-        get { lock (_lock) return _byPath.Count; }
+        lock (_lock)
+        {
+            if (_unflushed == 0) return;
+            PersistLocked();
+            _unflushed = 0;
+            _lastFlushUtc = DateTime.UtcNow;
+        }
     }
 
     private void Load()

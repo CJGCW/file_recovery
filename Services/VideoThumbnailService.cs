@@ -138,8 +138,14 @@ public static class VideoThumbnailService
                 try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
             });
 
+            // Drain both pipes in parallel. With -i ffmpeg writes only to
+            // stderr today, but defending against a future caller passing
+            // args that produce stdout — an undrained full pipe buffer would
+            // deadlock the process and hang us on WaitForExit.
+            var stdoutTask = Task.Run(() => { try { proc.StandardOutput.ReadToEnd(); } catch { } });
             string stderr = proc.StandardError.ReadToEnd();
             try { proc.WaitForExit(5000); } catch { }
+            try { stdoutTask.Wait(500); } catch { }
             return string.IsNullOrWhiteSpace(stderr)
                 ? "(ffmpeg returned no output — file may be 0 bytes or unreachable)"
                 : stderr.Trim();
